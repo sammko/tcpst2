@@ -2,96 +2,47 @@ pub mod cb;
 pub mod smol_channel;
 pub mod smol_lower;
 pub mod st;
+pub mod st_macros;
 
 use std::marker::PhantomData;
 
 use crate::cb::{Connected, Data, Open, TcbCreated};
 use crate::smol_channel::{Ack, Syn, SynAck};
 use crate::st::{Action, OfferOne, Role, SelectOne};
+use st_macros::{Rec, Role, St};
 
-type SsclInner = OfferOne<
-    RoleClientSystem,
-    Ack, // empty
-    OfferOne<
-        RoleClientSystem,
-        Ack, // with data
-        SelectOne<
-            RoleServerUser,
-            Data,
-            OfferOne<RoleServerUser, Data, SelectOne<RoleClientSystem, Ack, ServerSystemCommLoop>>,
-        >,
-    >,
->;
-pub struct ServerSystemCommLoop(PhantomData<SsclInner>);
+Role!(pub RoleServerSystem);
+Role!(pub RoleServerUser);
+Role!(pub RoleClientSystem);
 
-impl ServerSystemCommLoop {
-    pub fn inner(self) -> SsclInner {
-        SsclInner::new()
-    }
-}
+Rec!(pub ServerSystemCommLoop, SsclInner, [
+    (RoleClientSystem & Ack /* empty */).
+    (RoleClientSystem & Ack /* with data */).
+    (RoleServerUser + Data).
+    (RoleServerUser & Data).
+    (RoleClientSystem + Ack).
+    ServerSystemCommLoop
+]);
 
-impl Action for ServerSystemCommLoop {
-    fn new() -> Self {
-        Self(PhantomData)
-    }
-}
+pub type ServerSystemSessionType = St![
+    (RoleServerUser & Open).
+    (RoleServerUser + TcbCreated).
+    (RoleClientSystem & Syn).
+    (RoleClientSystem + SynAck).
+    (RoleClientSystem & Ack).
+    (RoleServerUser + Connected).
+    ServerSystemCommLoop
+];
 
-pub type ServerSystemSessionType = OfferOne<
-    RoleServerUser,
-    Open,
-    SelectOne<
-        RoleServerUser,
-        TcbCreated,
-        OfferOne<
-            RoleClientSystem,
-            Syn,
-            SelectOne<
-                RoleClientSystem,
-                SynAck,
-                OfferOne<
-                    RoleClientSystem,
-                    Ack,
-                    SelectOne<RoleServerUser, Connected, ServerSystemCommLoop>,
-                >,
-            >,
-        >,
-    >,
->;
+Rec!(pub ServerUserCommLoop, SuclInner, [
+    (RoleServerSystem & Data).
+    (RoleServerSystem + Data).
+    ServerUserCommLoop
+]);
 
-type SuclInner =
-    OfferOne<RoleServerSystem, Data, SelectOne<RoleServerSystem, Data, ServerUserCommLoop>>;
-
-pub struct ServerUserCommLoop(PhantomData<SuclInner>);
-
-impl ServerUserCommLoop {
-    pub fn inner(self) -> SuclInner {
-        SuclInner::new()
-    }
-}
-
-impl Action for ServerUserCommLoop {
-    fn new() -> Self {
-        ServerUserCommLoop(PhantomData)
-    }
-}
-
-pub type ServerUserSessionType = SelectOne<
-    RoleServerSystem,
-    Open,
-    OfferOne<
-        RoleServerSystem,
-        TcbCreated,
-        OfferOne<RoleServerSystem, Connected, ServerUserCommLoop>,
-    >,
->;
-
-macro_rules! role {
-    (pub $name:ident) => {
-        pub struct $name;
-        impl Role for $name {}
-    };
-}
-
-role!(pub RoleServerSystem);
-role!(pub RoleServerUser);
-role!(pub RoleClientSystem);
+pub type ServerUserSessionType = St![
+    (RoleServerSystem + Open).
+    (RoleServerSystem & TcbCreated).
+    (RoleServerSystem & Connected).
+    ServerUserCommLoop
+];

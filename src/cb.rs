@@ -15,9 +15,12 @@ use std::marker::PhantomData;
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::st::{
-    Action, Branch, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
-    SessionTypedChannel,
+use crate::{
+    st::{
+        Action, Branch, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
+        SessionTypedChannel,
+    },
+    st_macros::empty_message,
 };
 
 /// [CrossBeamRoleChannel] is a session-typed communication channel that uses crossbeam channels under the hood.
@@ -133,53 +136,10 @@ where
     }
 }
 
-pub struct Open {}
-
-impl Message for Open {
-    fn to_net_representation(self) -> Vec<u8> {
-        vec![]
-    }
-
-    fn from_net_representation(_packet: Vec<u8>) -> Self {
-        Open {}
-    }
-}
-
-pub struct TcbCreated {}
-
-impl Message for TcbCreated {
-    fn to_net_representation(self) -> Vec<u8> {
-        vec![]
-    }
-
-    fn from_net_representation(_packet: Vec<u8>) -> Self {
-        TcbCreated {}
-    }
-}
-
-pub struct Close {}
-
-impl Message for Close {
-    fn to_net_representation(self) -> Vec<u8> {
-        vec![]
-    }
-
-    fn from_net_representation(_packet: Vec<u8>) -> Self {
-        Close {}
-    }
-}
-
-pub struct Connected {}
-
-impl Message for Connected {
-    fn to_net_representation(self) -> Vec<u8> {
-        vec![]
-    }
-
-    fn from_net_representation(_packet: Vec<u8>) -> Self {
-        Connected {}
-    }
-}
+empty_message!(Open);
+empty_message!(TcbCreated);
+empty_message!(Connected);
+empty_message!(Close);
 
 pub struct Data {
     pub data: Vec<u8>,

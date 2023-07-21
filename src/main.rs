@@ -114,7 +114,7 @@ fn main() -> Result<()> {
 
             // Recieve a message of type ACK.
             let (ack_message, cont) = net_channel.offer_one(cont);
-            let packet = TcpPacket::new(&ack_message.packet).unwrap();
+            let _packet = TcpPacket::new(&ack_message.packet).unwrap();
             // TODO validate packet
 
             // Notify the user that the connection was established.
