@@ -6,10 +6,10 @@ pub mod st_macros;
 
 use std::marker::PhantomData;
 
-use crate::cb::{Connected, Data, Open, TcbCreated};
+use crate::cb::{Close, Connected, Data, Open, TcbCreated};
 use crate::smol_channel::{Ack, Syn, SynAck};
-use crate::st::{Action, OfferOne, Role, SelectOne};
-use st_macros::{Rec, Role, St};
+use crate::st::{Action, End, OfferOne, OfferTwo, Role, SelectOne, SelectTwo};
+use crate::st_macros::{Rec, Role, St};
 
 Role!(pub RoleServerSystem);
 Role!(pub RoleServerUser);
@@ -19,9 +19,10 @@ Rec!(pub ServerSystemCommLoop, SsclInner, [
     (RoleClientSystem & Ack /* empty */).
     (RoleClientSystem & Ack /* with data */).
     (RoleServerUser + Data).
-    (RoleServerUser & Data).
-    (RoleClientSystem + Ack).
-    ServerSystemCommLoop
+    (RoleServerUser & {
+        Data.(RoleClientSystem + Ack).ServerSystemCommLoop,
+        Close. /* TODO close sequence */ end
+    })
 ]);
 
 pub type ServerSystemSessionType = St![
@@ -36,8 +37,10 @@ pub type ServerSystemSessionType = St![
 
 Rec!(pub ServerUserCommLoop, SuclInner, [
     (RoleServerSystem & Data).
-    (RoleServerSystem + Data).
-    ServerUserCommLoop
+    (RoleServerSystem + {
+        Data.ServerUserCommLoop,
+        Close.end
+    })
 ]);
 
 pub type ServerUserSessionType = St![

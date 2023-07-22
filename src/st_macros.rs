@@ -22,7 +22,7 @@ macro_rules! Role {
 pub(crate) use Role;
 
 macro_rules! St {
-    [] => { End };
+    [ end ] => { End };
     [ $cont:ident ] => { $cont };
     [ ($peer:ident + $msg:ident) $(.$tail:tt)* $(.)?] => {
         SelectOne<$peer, $msg, St![$($tail).*]>
@@ -31,14 +31,14 @@ macro_rules! St {
         OfferOne<$peer, $msg, St![$($tail).*]>
     };
     [ ($peer:ident + {
-        $msg1:ident > [$($tail1:tt).* $(.)?],
-        $msg2:ident > [$($tail2:tt),* $(,)?]
+        $msg1:ident $(.$tail1:tt)*,
+        $msg2:ident $(.$tail2:tt)*
     }) ] => {
         SelectTwo<$peer, $msg1, $msg2, St![$($tail1).*], St![$($tail2).*]>
     };
     [ ($peer:ident & {
-        $msg1:ident > [$($tail1:tt).* $(.)?],
-        $msg2:ident > [$($tail2:tt).* $(.)?]
+        $msg1:ident $(.$tail1:tt)*,
+        $msg2:ident $(.$tail2:tt)*
     }) ] => {
         OfferTwo<$peer, $msg1, $msg2, St![$($tail1).*], St![$($tail2).*]>
     };

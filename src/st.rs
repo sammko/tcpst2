@@ -109,6 +109,11 @@ where
     }
 }
 
+pub enum Choice {
+    Left,
+    Right,
+}
+
 pub enum Branch<L, R> {
     Left(L),
     Right(R),
@@ -155,6 +160,8 @@ impl Action for End {
 }
 
 pub trait SessionTypedChannel<R1, R2> {
+    type TransportType;
+
     #[must_use]
     fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
     where
@@ -175,7 +182,7 @@ pub trait SessionTypedChannel<R1, R2> {
     fn offer_two<M1, M2, A1, A2>(
         &mut self,
         _o: OfferTwo<R2, M1, M2, A1, A2>,
-        picker: Box<dyn Fn() -> bool>,
+        picker: Box<dyn Fn(&Self::TransportType) -> Choice>,
     ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,

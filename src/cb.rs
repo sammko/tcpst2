@@ -17,7 +17,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::{
     st::{
-        Action, Branch, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
+        Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
         SessionTypedChannel,
     },
     st_macros::empty_message,
@@ -55,6 +55,8 @@ where
     R1: Role,
     R2: Role,
 {
+    type TransportType = Vec<u8>;
+
     fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
     where
         M: Message + 'static,
@@ -82,7 +84,7 @@ where
     fn offer_two<M1, M2, A1, A2>(
         &mut self,
         _o: OfferTwo<R2, M1, M2, A1, A2>,
-        picker: Box<dyn Fn() -> bool>,
+        picker: Box<dyn Fn(&Self::TransportType) -> Choice>,
     ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
@@ -92,16 +94,11 @@ where
         A1: Action,
         A2: Action,
     {
-        let choice = picker();
+        let data = self.recv.recv().unwrap();
+        let choice = picker(&data);
         match choice {
-            true => Branch::Left((
-                M1::from_net_representation(self.recv.recv().unwrap()),
-                A1::new(),
-            )),
-            false => Branch::Right((
-                M2::from_net_representation(self.recv.recv().unwrap()),
-                A2::new(),
-            )),
+            Choice::Left => Branch::Left((M1::from_net_representation(data), A1::new())),
+            Choice::Right => Branch::Right((M2::from_net_representation(data), A2::new())),
         }
     }
 
@@ -141,16 +138,22 @@ empty_message!(TcbCreated);
 empty_message!(Connected);
 empty_message!(Close);
 
+const MAGIC_DATA: u8 = 1;
+
 pub struct Data {
     pub data: Vec<u8>,
 }
 
 impl Message for Data {
     fn to_net_representation(self) -> Vec<u8> {
-        self.data
+        let mut data = vec![MAGIC_DATA];
+        data.extend(self.data);
+        data
     }
 
     fn from_net_representation(data: Vec<u8>) -> Self {
-        Data { data }
+        Data {
+            data: data[1..].to_vec(),
+        }
     }
 }

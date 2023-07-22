@@ -4,7 +4,7 @@ use smoltcp::wire::Ipv4Address;
 
 use crate::{
     smol_lower::SmolLower,
-    st::{Message, Role, SessionTypedChannel},
+    st::{Choice, Message, Role, SessionTypedChannel},
 };
 
 pub struct SmolChannel<'a, R1, R2>
@@ -36,6 +36,8 @@ where
     R1: Role,
     R2: Role,
 {
+    type TransportType = Vec<u8>;
+
     fn offer_one<M, A>(&mut self, _o: crate::st::OfferOne<R2, M, A>) -> (M, A)
     where
         M: crate::st::Message + 'static,
@@ -45,7 +47,7 @@ where
     {
         let (addr, buf) = self.lower.recv().expect("recv failed");
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
-        return (M::from_net_representation(buf), A::new());
+        (M::from_net_representation(buf), A::new())
     }
 
     fn select_one<M, A>(&mut self, _o: crate::st::SelectOne<R2, M, A>, message: M) -> A
@@ -59,13 +61,13 @@ where
         self.lower
             .send(self.remote_addr, &buf)
             .expect("send failed");
-        return A::new();
+        A::new()
     }
 
     fn offer_two<M1, M2, A1, A2>(
         &mut self,
         _o: crate::st::OfferTwo<R2, M1, M2, A1, A2>,
-        _picker: Box<dyn Fn() -> bool>,
+        picker: Box<dyn Fn(&Self::TransportType) -> Choice>,
     ) -> crate::st::Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
@@ -75,13 +77,20 @@ where
         A1: crate::st::Action,
         A2: crate::st::Action,
     {
-        todo!()
+        let (addr, buf) = self.lower.recv().expect("recv failed");
+        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
+        match picker(&buf) {
+            Choice::Left => crate::st::Branch::Left((M1::from_net_representation(buf), A1::new())),
+            Choice::Right => {
+                crate::st::Branch::Right((M2::from_net_representation(buf), A2::new()))
+            }
+        }
     }
 
     fn select_left<M1, M2, A1, A2>(
         &mut self,
         _o: crate::st::SelectTwo<R2, M1, M2, A1, A2>,
-        _message: M1,
+        message: M1,
     ) -> A1
     where
         R1: Role,
@@ -91,13 +100,17 @@ where
         A1: crate::st::Action,
         A2: crate::st::Action,
     {
-        todo!()
+        let buf = message.to_net_representation();
+        self.lower
+            .send(self.remote_addr, &buf)
+            .expect("send failed");
+        A1::new()
     }
 
     fn select_right<M1, M2, A1, A2>(
         &mut self,
         _o: crate::st::SelectTwo<R2, M1, M2, A1, A2>,
-        _message: M2,
+        message: M2,
     ) -> A2
     where
         R1: Role,
@@ -107,7 +120,11 @@ where
         A1: crate::st::Action,
         A2: crate::st::Action,
     {
-        todo!()
+        let buf = message.to_net_representation();
+        self.lower
+            .send(self.remote_addr, &buf)
+            .expect("send failed");
+        A2::new()
     }
 
     fn close(self, _end: crate::st::End) {

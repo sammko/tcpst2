@@ -8,10 +8,10 @@ use log::info;
 use pnet::packet::tcp::{ipv4_checksum, MutableTcpPacket, TcpFlags, TcpPacket};
 use pnet::packet::Packet;
 
-use tcpst2::cb::{Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
+use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::{Ack, SmolChannel, SynAck};
 use tcpst2::smol_lower::SmolLower;
-use tcpst2::st::{Action, SessionTypedChannel};
+use tcpst2::st::{Action, Branch, Choice, SessionTypedChannel};
 use tcpst2::{
     RoleClientSystem, RoleServerSystem, RoleServerUser, ServerSystemSessionType,
     ServerUserSessionType,
@@ -54,12 +54,15 @@ fn main() -> Result<()> {
                 let str = String::from_utf8(rx.data).unwrap();
                 println!("User received data: {:?}", str);
 
-                let len = response.len();
-                if len > 0 {
+                if response.len() > 1 {
+                    let len = response.len();
                     response[..len - 1].reverse();
+                    reccont = user_system_channel.select_left(cont, Data { data: response })
+                } else {
+                    let cont = user_system_channel.select_right(cont, Close {});
+                    user_system_channel.close(cont);
+                    break;
                 }
-
-                reccont = user_system_channel.select_one(cont, Data { data: response });
             }
 
             // let cont = user_system_channel.select_one(cont, Close {});
@@ -138,31 +141,46 @@ fn main() -> Result<()> {
                     },
                 );
 
-                let (data, cont) = system_user_channel.offer_one(cont);
-
-                let mut vec: Vec<u8> = vec![0; 20 + data.data.len()];
-                let mut new_packet = MutableTcpPacket::new(&mut vec).unwrap();
-                new_packet.set_flags(TcpFlags::ACK | TcpFlags::PSH);
-                new_packet.set_sequence(seq);
-                println!("seq: {}", seq);
-                new_packet
-                    .set_acknowledgement(packet.get_sequence().add(packet.payload().len() as u32));
-                new_packet.set_source(packet.get_destination());
-                new_packet.set_destination(packet.get_source());
-                new_packet.set_window(1024);
-                new_packet.set_data_offset(5);
-                new_packet.set_payload(&data.data);
-                let checksum = ipv4_checksum(&new_packet.to_immutable(), &local_addr, &remote_addr);
-                new_packet.set_checksum(checksum);
-                let new_packet_slice = new_packet.packet();
-                seq += data.data.len() as u32;
-
-                reccont = net_channel.select_one(
+                match system_user_channel.offer_two(
                     cont,
-                    Ack {
-                        packet: new_packet_slice.to_vec(),
-                    },
-                );
+                    Box::new(|v| match v.len() {
+                        // TODO this is fugly
+                        0 => Choice::Right,
+                        _ => Choice::Left,
+                    }),
+                ) {
+                    Branch::Left((data, cont)) => {
+                        let mut vec: Vec<u8> = vec![0; 20 + data.data.len()];
+                        let mut new_packet = MutableTcpPacket::new(&mut vec).unwrap();
+                        new_packet.set_flags(TcpFlags::ACK | TcpFlags::PSH);
+                        new_packet.set_sequence(seq);
+                        println!("seq: {}", seq);
+                        new_packet.set_acknowledgement(
+                            packet.get_sequence().add(packet.payload().len() as u32),
+                        );
+                        new_packet.set_source(packet.get_destination());
+                        new_packet.set_destination(packet.get_source());
+                        new_packet.set_window(1024);
+                        new_packet.set_data_offset(5);
+                        new_packet.set_payload(&data.data);
+                        let checksum =
+                            ipv4_checksum(&new_packet.to_immutable(), &local_addr, &remote_addr);
+                        new_packet.set_checksum(checksum);
+                        let new_packet_slice = new_packet.packet();
+                        seq += data.data.len() as u32;
+
+                        reccont = net_channel.select_one(
+                            cont,
+                            Ack {
+                                packet: new_packet_slice.to_vec(),
+                            },
+                        );
+                    }
+                    Branch::Right((_close, cont)) => {
+                        system_user_channel.close(cont);
+                        break;
+                    }
+                }
             }
         });
         thread_a.join().unwrap();
