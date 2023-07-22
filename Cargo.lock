@@ -260,6 +260,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43794a0ace135be66a25d3ae77d41b91615fb68ae937f904090203e81f755b65"
 
 [[package]]
+name = "paste"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
+
+[[package]]
 name = "pnet"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -531,6 +537,7 @@ dependencies = [
  "anyhow",
  "crossbeam-channel",
  "log",
+ "paste",
  "pnet",
  "pretty_env_logger",
  "smoltcp",

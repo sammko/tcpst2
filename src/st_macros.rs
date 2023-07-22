@@ -46,19 +46,21 @@ macro_rules! St {
 pub(crate) use St;
 
 macro_rules! Rec {
-    (pub $name:ident, $inner:ident, $body:tt) => {
-        pub struct $name(PhantomData<$inner>);
+    (pub $name:ident, $body:tt) => {
+        paste! {
+            pub struct $name(PhantomData<[<$name Inner>]>);
+            type [<$name Inner>] = St!$body;
+            impl $name {
+                pub fn inner(self) -> [<$name Inner>] {
+                    [<$name Inner>]::new()
+                }
+            }
+        }
         impl Action for $name {
             fn new() -> Self {
                 Self(PhantomData)
             }
         }
-        impl $name {
-            pub fn inner(self) -> $inner {
-                $inner::new()
-            }
-        }
-        type $inner = St!$body;
     };
 }
 pub(crate) use Rec;

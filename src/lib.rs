@@ -4,6 +4,7 @@ pub mod smol_lower;
 pub mod st;
 pub mod st_macros;
 
+use paste::paste;
 use std::marker::PhantomData;
 
 use crate::cb::{Close, Connected, Data, Open, TcbCreated};
@@ -15,7 +16,7 @@ Role!(pub RoleServerSystem);
 Role!(pub RoleServerUser);
 Role!(pub RoleClientSystem);
 
-Rec!(pub ServerSystemCommLoop, SsclInner, [
+Rec!(pub ServerSystemCommLoop, [
     (RoleClientSystem & Ack /* empty */).
     (RoleClientSystem & Ack /* with data */).
     (RoleServerUser + Data).
@@ -35,7 +36,7 @@ pub type ServerSystemSessionType = St![
     ServerSystemCommLoop
 ];
 
-Rec!(pub ServerUserCommLoop, SuclInner, [
+Rec!(pub ServerUserCommLoop, [
     (RoleServerSystem & Data).
     (RoleServerSystem + {
         Data.ServerUserCommLoop,
