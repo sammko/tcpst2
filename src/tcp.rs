@@ -18,6 +18,10 @@ pub struct RemoteAddr {
     port: u16,
 }
 
+pub trait ChannelFilter<T> {
+    fn filter(&self, packet: &T) -> bool;
+}
+
 #[allow(dead_code)]
 struct Tcb {
     iss: TcpSeqNumber,
@@ -124,11 +128,29 @@ impl TcpListen {
     }
 }
 
-impl<T> Tcp<T>
+impl ChannelFilter<Vec<u8>> for TcpListen {
+    fn filter(&self, packet: &Vec<u8>) -> bool {
+        // This is a bit janky but it works for now
+        if let Ok(tcp) = TcpPacket::new_checked(packet) {
+            if tcp.syn() == true
+                && tcp.ack() == false
+                && tcp.rst() == false
+                && tcp.fin() == false
+                && tcp.psh() == false
+            {
+                return true;
+            }
+        }
+        warn!("Dropping non-SYN");
+        false
+    }
+}
+
+impl<T> ChannelFilter<Vec<u8>> for Tcp<T>
 where
     T: TcpState,
 {
-    pub fn filter(&self, packet: &[u8]) -> bool {
+    fn filter(&self, packet: &Vec<u8>) -> bool {
         let packet = TcpPacket::new_checked(packet).unwrap();
 
         if packet.dst_port() == self.local.port && packet.src_port() == self.remote.port {

@@ -3,9 +3,8 @@ use std::thread;
 
 use anyhow::Result;
 use crossbeam_channel::unbounded;
-use log::{info, warn};
+use log::info;
 
-use smoltcp::wire::TcpPacket;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
@@ -17,7 +16,9 @@ use tcpst2::{
 };
 
 fn main() -> Result<()> {
-    pretty_env_logger::init();
+    pretty_env_logger::formatted_builder()
+        .filter_level(log::LevelFilter::Trace)
+        .init();
 
     let remote_addr = Ipv4Addr::new(192, 168, 22, 100);
     let local_addr = Ipv4Addr::new(192, 168, 22, 1);
@@ -91,21 +92,12 @@ fn main() -> Result<()> {
 
             let st = system_user_channel.select_one(st, TcbCreated {});
 
-            let (syn, st) = net_channel.offer_one_filtered(st, |payload| {
-                // This is a bit janky but it works for now
-                if let Ok(tcp) = TcpPacket::new_checked(payload) {
-                    if tcp.syn() == true && tcp.ack() == false {
-                        return true;
-                    }
-                }
-                warn!("Dropping non-SYN");
-                false
-            });
+            let (syn, st) = net_channel.offer_one_filtered(st, &tcp);
 
             let (tcp, synack) = tcp.recv_syn(remote_addr, &syn);
             let st = net_channel.select_one(st, synack);
 
-            let (ack, st) = net_channel.offer_one_filtered(st, |p| tcp.filter(p));
+            let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
             let mut tcp = tcp.recv_ack(&ack);
 
             let st = system_user_channel.select_one(st, Connected {});
@@ -115,7 +107,7 @@ fn main() -> Result<()> {
             loop {
                 let st = recursive.inner();
 
-                let (rx, st) = net_channel.offer_one_filtered(st, |p| tcp.filter(p));
+                let (rx, st) = net_channel.offer_one_filtered(st, &tcp);
                 let (resp, data) = tcp.recv(&rx);
                 let st = net_channel.select_one(st, resp);
 
@@ -139,7 +131,7 @@ fn main() -> Result<()> {
                     Branch::Left((data, st)) => {
                         let tx = tcp.send(&data.data);
                         let st = net_channel.select_one(st, tx);
-                        let (ack, st) = net_channel.offer_one_filtered(st, |p| tcp.filter(p));
+                        let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
                         tcp.recv(&ack);
                         recursive = st;
                         continue;
