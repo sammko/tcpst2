@@ -1,4 +1,3 @@
-use core::panic;
 use std::{marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
 
 use log::{info, warn};
@@ -121,6 +120,22 @@ impl TcpListen {
             },
             SynAck { packet: resp_data },
         )
+    }
+}
+
+impl<T> Tcp<T>
+where
+    T: TcpState,
+{
+    pub fn filter(&self, packet: &[u8]) -> bool {
+        let packet = TcpPacket::new_checked(packet).unwrap();
+
+        if packet.dst_port() == self.local.port && packet.src_port() == self.remote.port {
+            true
+        } else {
+            warn!("dropping packet to wrong port");
+            false
+        }
     }
 }
 

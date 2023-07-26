@@ -4,7 +4,7 @@ use smoltcp::wire::Ipv4Address;
 
 use crate::{
     smol_lower::SmolLower,
-    st::{Choice, Message, Role, SessionTypedChannel},
+    st::{Action, Choice, Message, OfferOne, Role, SessionTypedChannel},
 };
 
 pub struct SmolChannel<'a, R1, R2>
@@ -28,6 +28,22 @@ where
             remote_addr,
             phantom: PhantomData,
         }
+    }
+
+    pub fn offer_one_filtered<M, A, F>(&mut self, _o: OfferOne<R2, M, A>, filter: F) -> (M, A)
+    where
+        M: Message,
+        A: Action,
+        F: Fn(&<SmolChannel<'a, R1, R2> as SessionTypedChannel<R1, R2>>::TransportType) -> bool,
+    {
+        let (addr, buf) = loop {
+            let (addr, buf) = self.lower.recv().expect("recv failed");
+            if filter(&buf) {
+                break (addr, buf);
+            }
+        };
+        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
+        (M::from_net_representation(buf), A::new())
     }
 }
 
