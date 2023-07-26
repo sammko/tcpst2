@@ -18,6 +18,7 @@ pub struct RemoteAddr {
     port: u16,
 }
 
+#[allow(dead_code)]
 struct Tcb {
     iss: TcpSeqNumber,
     snd_una: TcpSeqNumber,
