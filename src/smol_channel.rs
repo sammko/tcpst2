@@ -64,10 +64,10 @@ where
         A::new()
     }
 
-    fn offer_two<M1, M2, A1, A2>(
+    fn offer_two<M1, M2, A1, A2, F>(
         &mut self,
         _o: crate::st::OfferTwo<R2, M1, M2, A1, A2>,
-        picker: Box<dyn Fn(&Self::TransportType) -> Choice>,
+        picker: F,
     ) -> crate::st::Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
@@ -76,6 +76,7 @@ where
         M2: crate::st::Message + 'static,
         A1: crate::st::Action,
         A2: crate::st::Action,
+        F: FnOnce(&Self::TransportType) -> Choice,
     {
         let (addr, buf) = self.lower.recv().expect("recv failed");
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers

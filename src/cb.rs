@@ -81,10 +81,10 @@ where
         A::new()
     }
 
-    fn offer_two<M1, M2, A1, A2>(
+    fn offer_two<M1, M2, A1, A2, F>(
         &mut self,
         _o: OfferTwo<R2, M1, M2, A1, A2>,
-        picker: Box<dyn Fn(&Self::TransportType) -> Choice>,
+        picker: F,
     ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
@@ -93,6 +93,7 @@ where
         M2: Message + 'static,
         A1: Action,
         A2: Action,
+        F: FnOnce(&Self::TransportType) -> Choice,
     {
         let data = self.recv.recv().unwrap();
         let choice = picker(&data);

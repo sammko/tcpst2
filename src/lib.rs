@@ -3,6 +3,7 @@ pub mod smol_channel;
 pub mod smol_lower;
 pub mod st;
 pub mod st_macros;
+pub mod tcp;
 
 use paste::paste;
 use std::marker::PhantomData;
@@ -17,11 +18,14 @@ Role!(pub RoleServerUser);
 Role!(pub RoleClientSystem);
 
 Rec!(pub ServerSystemCommLoop, [
-    (RoleClientSystem & Ack /* empty */).
-    (RoleClientSystem & Ack /* with data */).
+    (RoleClientSystem & Ack).
+    (RoleClientSystem + Ack /* empty */).
     (RoleServerUser + Data).
     (RoleServerUser & {
-        Data.(RoleClientSystem + Ack).ServerSystemCommLoop,
+        Data.
+            (RoleClientSystem + Ack).
+            (RoleClientSystem & Ack /* empty ack */).
+            ServerSystemCommLoop,
         Close. /* TODO close sequence */ end
     })
 ]);

@@ -179,10 +179,10 @@ pub trait SessionTypedChannel<R1, R2> {
         R2: Role;
 
     #[must_use]
-    fn offer_two<M1, M2, A1, A2>(
+    fn offer_two<M1, M2, A1, A2, F>(
         &mut self,
         _o: OfferTwo<R2, M1, M2, A1, A2>,
-        picker: Box<dyn Fn(&Self::TransportType) -> Choice>,
+        picker: F,
     ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
@@ -190,7 +190,8 @@ pub trait SessionTypedChannel<R1, R2> {
         M1: Message + 'static,
         M2: Message + 'static,
         A1: Action,
-        A2: Action;
+        A2: Action,
+        F: FnOnce(&Self::TransportType) -> Choice;
 
     #[must_use]
     fn select_left<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M1) -> A1
