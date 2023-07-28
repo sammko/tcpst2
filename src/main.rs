@@ -31,36 +31,36 @@ fn main() -> Result<()> {
     let mut user_system_channel =
         CrossBeamRoleChannel::<RoleServerUser, RoleServerSystem>::new(cbtx1, cbrx2);
 
-    let st_sustem_user = ServerUserSessionType::new();
-
     thread::scope(|scope| {
         let thread_a = scope.spawn(|| {
             // Thread A simulates the kind of calls the userspace would send to the TCP system.
             // These are not actually implemented but it demonstrates the user of another
             // session typed channel on a different medium.
             // This also allows us to demonstrate the TCP system communicating with two sepparate participants.
+            let st = ServerUserSessionType::new();
 
-            let cont =
-                user_system_channel.select_one(st_sustem_user, Open { /* always passive */ });
-            let (_, cont) = user_system_channel.offer_one(cont);
-            let (_, cont) = user_system_channel.offer_one(cont);
+            let st = user_system_channel.select_one(st, Open { /* always passive */ });
+            let (_tcb_created, st) = user_system_channel.offer_one(st);
+            let (_connected, st) = user_system_channel.offer_one(st);
 
-            let mut reccont = cont;
+            let mut recursive = st;
             loop {
-                let cont = reccont.inner();
-                let (rx, cont) = user_system_channel.offer_one(cont);
+                let st = recursive.inner();
+                let (rx, st) = user_system_channel.offer_one(st);
 
-                let mut response = rx.data.clone();
+                let mut message = rx.data.clone();
+
                 let str = String::from_utf8(rx.data).unwrap();
                 println!("User received data: {:?}", str);
 
-                if response.len() > 1 {
-                    let len = response.len();
-                    response[..len - 1].reverse();
-                    reccont = user_system_channel.select_left(cont, Data { data: response })
+                if message.len() > 1 {
+                    let len = message.len();
+                    message[..len - 1].reverse();
+                    recursive = user_system_channel.select_left(st, Data { data: message });
+                    continue;
                 } else {
-                    let cont = user_system_channel.select_right(cont, Close {});
-                    user_system_channel.close(cont);
+                    let st = user_system_channel.select_right(st, Close {});
+                    user_system_channel.close(st);
                     break;
                 }
             }
