@@ -17,7 +17,10 @@ Role!(pub RoleServerSystem);
 Role!(pub RoleServerUser);
 Role!(pub RoleClientSystem);
 
-pub type ServerSystemFinWait1 = St![(RoleClientSystem & Ack/* ACK of FIN */).ServerSystemFinWait2];
+pub type ServerSystemFinWait1 = St![
+    (RoleClientSystem & Ack/* ACK of FIN. TODO we should handle other ACKs here as well maybe */)
+        .ServerSystemFinWait2
+];
 
 Rec!(pub ServerSystemFinWait2, [
     (RoleClientSystem & {
@@ -30,18 +33,37 @@ Rec!(pub ServerSystemFinWait2, [
     })
 ]);
 
-Rec!(pub ServerSystemCommLoop, [
-    (RoleClientSystem & Ack).
-    (RoleClientSystem + Ack /* empty */).
-    (RoleServerUser + Data).
+Rec!(pub ServerSystemCloseWait, [
     (RoleServerUser & {
         Data.
             (RoleClientSystem + Ack).
             (RoleClientSystem & Ack /* empty ack */).
-            ServerSystemCommLoop,
+            ServerSystemCloseWait,
         Close.
             (RoleClientSystem + FinAck).
-            ServerSystemFinWait1
+            (RoleClientSystem & Ack).
+            end
+    })
+]);
+
+Rec!(pub ServerSystemCommLoop, [
+    (RoleClientSystem & {
+        Ack.
+            (RoleClientSystem + Ack /* empty */).
+            (RoleServerUser + Data).
+            (RoleServerUser & {
+                Data.
+                    (RoleClientSystem + Ack).
+                    (RoleClientSystem & Ack /* empty ack */).
+                    ServerSystemCommLoop,
+                Close.
+                    (RoleClientSystem + FinAck).
+                    ServerSystemFinWait1
+            }),
+        FinAck.
+            (RoleClientSystem + Ack /* we ACK the FIN */).
+            (RoleServerUser + Close).
+            ServerSystemCloseWait
     })
 ]);
 
@@ -55,11 +77,21 @@ pub type ServerSystemSessionType = St![
     ServerSystemCommLoop
 ];
 
-Rec!(pub ServerUserCommLoop, [
-    (RoleServerSystem & Data).
+Rec!(pub ServerUserCloseWait, [
     (RoleServerSystem + {
-        Data.ServerUserCommLoop,
+        Data.ServerUserCloseWait,
         Close.end
+    })
+]);
+
+Rec!(pub ServerUserCommLoop, [
+    (RoleServerSystem & {
+        Data.
+            (RoleServerSystem + {
+                Data.ServerUserCommLoop,
+                Close.end
+            }),
+        Close.ServerUserCloseWait
     })
 ]);
 

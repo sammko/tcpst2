@@ -45,24 +45,50 @@ fn main() -> Result<()> {
             let (_connected, st) = user_system_channel.offer_one(st);
 
             let mut recursive = st;
-            loop {
+            'top: loop {
                 let st = recursive.inner();
-                let (rx, st) = user_system_channel.offer_one(st);
 
-                let mut message = rx.data.clone();
+                match user_system_channel.offer_two(st, |payload| {
+                    // TODO improve this signalling
+                    if payload.len() > 0 {
+                        Choice::Left
+                    } else {
+                        Choice::Right
+                    }
+                }) {
+                    Branch::Left((data, st)) => {
+                        let mut message = data.data;
 
-                let str = String::from_utf8(rx.data).unwrap();
-                println!("User received data: {:?}", str);
+                        println!(
+                            "User received data: {:?}",
+                            std::str::from_utf8(&message).unwrap_or("<invalid utf8>")
+                        );
 
-                if message.len() > 1 {
-                    let len = message.len();
-                    message[..len - 1].reverse();
-                    recursive = user_system_channel.select_left(st, Data { data: message });
-                    continue;
-                } else {
-                    let st = user_system_channel.select_right(st, Close {});
-                    user_system_channel.close(st);
-                    break;
+                        if message.len() > 1 {
+                            let len = message.len();
+                            message[..len - 1].reverse();
+                            recursive = user_system_channel.select_left(st, Data { data: message });
+                            continue;
+                        } else {
+                            let st = user_system_channel.select_right(st, Close {});
+                            user_system_channel.close(st);
+                            break 'top;
+                        }
+                    }
+                    Branch::Right((_close, recursive)) => {
+                        let st = recursive.inner();
+                        let st = user_system_channel
+                            .select_left(
+                                st,
+                                Data {
+                                    data: b"closing".to_vec(),
+                                },
+                            )
+                            .inner();
+                        let st = user_system_channel.select_right(st, Close {});
+                        user_system_channel.close(st);
+                        break 'top;
+                    }
                 }
             }
 
@@ -108,71 +134,118 @@ fn main() -> Result<()> {
             'top: loop {
                 let st = recursive.inner();
 
-                let (rx, st) = net_channel.offer_one_filtered(st, &tcp);
-                let (resp, data) = tcp.recv(&rx);
-                let st = net_channel.select_one(st, resp);
-
-                info!("Got {:?} bytes", data.len());
-
-                let st = system_user_channel.select_one(
+                match net_channel.offer_two_filtered(
                     st,
-                    Data {
-                        data: data.to_owned(),
+                    |packet| {
+                        let packet = TcpPacket::new_checked(&packet).unwrap();
+                        if packet.fin() {
+                            Choice::Right
+                        } else {
+                            Choice::Left
+                        }
                     },
-                );
+                    &tcp,
+                ) {
+                    Branch::Left((rx, st)) => {
+                        let (resp, data) = tcp.recv(&rx);
+                        let st = net_channel.select_one(st, resp);
 
-                match system_user_channel.offer_two(st, |payload| {
-                    // TODO improve this signalling
-                    if payload.len() > 0 {
-                        Choice::Left
-                    } else {
-                        Choice::Right
+                        info!("Got {:?} bytes", data.len());
+
+                        let st = system_user_channel.select_one(
+                            st,
+                            Data {
+                                data: data.to_owned(),
+                            },
+                        );
+
+                        match system_user_channel.offer_two(st, |payload| {
+                            // TODO improve this signalling
+                            if payload.len() > 0 {
+                                Choice::Left
+                            } else {
+                                Choice::Right
+                            }
+                        }) {
+                            Branch::Left((data, st)) => {
+                                let tx = tcp.send(&data.data);
+                                let st = net_channel.select_one(st, tx);
+                                let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
+                                tcp.recv(&ack);
+                                recursive = st;
+                                continue;
+                            }
+                            Branch::Right((_close, st)) => {
+                                let (tcp, fin) = tcp.close();
+                                let st = net_channel.select_one(st, fin);
+
+                                let (rx, mut recursive) = net_channel.offer_one(st);
+                                let mut tcp = tcp.recv(&rx);
+
+                                loop {
+                                    let st = recursive.inner();
+                                    match net_channel.offer_two_filtered(
+                                        st,
+                                        |packet| {
+                                            let packet = TcpPacket::new_checked(&packet).unwrap();
+                                            if packet.fin() {
+                                                Choice::Right
+                                            } else {
+                                                Choice::Left
+                                            }
+                                        },
+                                        &tcp,
+                                    ) {
+                                        Branch::Left((ack, st)) => {
+                                            // We have received data from the Client, but we
+                                            // will just throw it away, since our user has
+                                            // closed.
+                                            let ack = tcp.recv_ack(&ack);
+                                            recursive = net_channel.select_one(st, ack);
+                                            continue;
+                                        }
+                                        Branch::Right((fin, st)) => {
+                                            let ack = tcp.recv_fin(&fin);
+                                            let st = net_channel.select_one(st, ack);
+                                            net_channel.close(st);
+                                            // I think the `End` concept doesn't work since we want
+                                            // to be able to close both channels and only have one
+                                            // End? Maybe we can make it Clone?
+                                            break 'top;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                }) {
-                    Branch::Left((data, st)) => {
-                        let tx = tcp.send(&data.data);
-                        let st = net_channel.select_one(st, tx);
-                        let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
-                        tcp.recv(&ack);
-                        recursive = st;
-                        continue;
-                    }
-                    Branch::Right((_close, st)) => {
-                        let (tcp, fin) = tcp.close();
-                        let st = net_channel.select_one(st, fin);
-
-                        let (rx, mut recursive) = net_channel.offer_one(st);
-                        let mut tcp = tcp.recv(&rx);
-
+                    Branch::Right((fin, st)) => {
+                        let (mut tcp, ack) = tcp.recv_fin(&fin);
+                        let st = net_channel.select_one(st, ack);
+                        let mut recursive = system_user_channel.select_one(st, Close {});
                         loop {
                             let st = recursive.inner();
-                            match net_channel.offer_two_filtered(
-                                st,
-                                |packet| {
-                                    let packet = TcpPacket::new_checked(&packet).unwrap();
-                                    if packet.fin() {
-                                        Choice::Right
-                                    } else {
-                                        Choice::Left
-                                    }
-                                },
-                                &tcp,
-                            ) {
-                                Branch::Left((ack, st)) => {
-                                    // We have received data from the Client, but we
-                                    // will just throw it away, since our user has
-                                    // closed.
-                                    let ack = tcp.recv_ack(&ack);
-                                    recursive = net_channel.select_one(st, ack);
+                            match system_user_channel.offer_two(st, |payload| {
+                                // TODO improve this signalling
+                                if payload.len() > 0 {
+                                    Choice::Left
+                                } else {
+                                    Choice::Right
+                                }
+                            }) {
+                                Branch::Left((data, st)) => {
+                                    let tx = tcp.send(&data.data);
+                                    let st = net_channel.select_one(st, tx);
+                                    let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
+                                    tcp.recv_ack(&ack);
+                                    recursive = st;
                                     continue;
                                 }
-                                Branch::Right((fin, st)) => {
-                                    let ack = tcp.recv_fin(&fin);
-                                    let st = net_channel.select_one(st, ack);
+                                Branch::Right((_close, st)) => {
+                                    let (tcp, fin) = tcp.close();
+                                    let st = net_channel.select_one(st, fin);
+                                    let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
+                                    tcp.recv_ack(&ack);
                                     net_channel.close(st);
-                                    // I think the `End` concept doesn't work since we want
-                                    // to be able to close both channels and only have one
-                                    // End? Maybe we can make it Clone?
                                     break 'top;
                                 }
                             }

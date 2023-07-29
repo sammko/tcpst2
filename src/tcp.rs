@@ -44,11 +44,15 @@ pub struct SynRcvd;
 pub struct Established;
 pub struct FinWait1;
 pub struct FinWait2;
+pub struct CloseWait;
+pub struct LastAck;
 
 impl TcpState for SynRcvd {}
 impl TcpState for Established {}
 impl TcpState for FinWait1 {}
 impl TcpState for FinWait2 {}
+impl TcpState for CloseWait {}
+impl TcpState for LastAck {}
 
 pub trait TcpState {} // TODO maybe seal this
 
@@ -266,6 +270,35 @@ impl Tcp<Established> {
         }
     }
 
+    pub fn recv_fin(mut self, fin: &FinAck) -> (Tcp<CloseWait>, Ack) {
+        // TODO also handle data here
+        let fin = TcpPacket::new_checked(&fin.packet).unwrap();
+        let fin = TcpRepr::parse(
+            &fin,
+            &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
+            &self.local.checksum_caps,
+        )
+        .unwrap();
+
+        if fin.seq_number == self.tcb.rcv_nxt {
+            self.tcb.rcv_nxt.add_assign(fin.payload.len() + 1);
+        } else {
+            todo!("out of order packets not implemented")
+        }
+
+        let ack = self.build_ack(&[]);
+        (
+            Tcp {
+                local: self.local,
+                remote: self.remote,
+                tcb: self.tcb,
+                _marker: PhantomData,
+            },
+            ack,
+        )
+    }
+
     pub fn send(&mut self, data: &[u8]) -> Ack {
         self.build_ack(data)
     }
@@ -356,5 +389,56 @@ impl Tcp<FinWait2> {
         // TODO check stuff
 
         self.build_ack(&[])
+    }
+}
+
+impl Tcp<CloseWait> {
+    pub fn recv_ack(&mut self, ack: &Ack) {
+        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
+        let ack = TcpRepr::parse(
+            &ack,
+            &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
+            &self.local.checksum_caps,
+        )
+        .unwrap();
+
+        if Some(self.tcb.snd_nxt) != ack.ack_number {
+            warn!("got out of order ACK");
+        }
+    }
+
+    pub fn send(&mut self, data: &[u8]) -> Ack {
+        self.build_ack(data)
+    }
+
+    pub fn close(mut self) -> (Tcp<LastAck>, FinAck) {
+        let fin = self.build_fin();
+        (
+            Tcp {
+                local: self.local,
+                remote: self.remote,
+                tcb: self.tcb,
+                _marker: PhantomData,
+            },
+            fin,
+        )
+    }
+}
+
+impl Tcp<LastAck> {
+    pub fn recv_ack(self, ack: &Ack) {
+        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
+        let ack = TcpRepr::parse(
+            &ack,
+            &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
+            &self.local.checksum_caps,
+        )
+        .unwrap();
+
+        if Some(self.tcb.snd_nxt) != ack.ack_number {
+            warn!("got out of order ACK");
+        }
     }
 }
