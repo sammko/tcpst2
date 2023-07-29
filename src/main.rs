@@ -5,6 +5,7 @@ use anyhow::Result;
 use crossbeam_channel::unbounded;
 use log::info;
 
+use smoltcp::wire::TcpPacket;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
@@ -104,7 +105,7 @@ fn main() -> Result<()> {
             info!("established");
 
             let mut recursive = st;
-            loop {
+            'top: loop {
                 let st = recursive.inner();
 
                 let (rx, st) = net_channel.offer_one_filtered(st, &tcp);
@@ -136,14 +137,46 @@ fn main() -> Result<()> {
                         recursive = st;
                         continue;
                     }
-                    Branch::Right((_close, end)) => {
-                        // TODO close sequence
-                        system_user_channel.close(end);
-                        // I think the `End` concept doesn't work since we want
-                        // to be able to close both channels and only have one
-                        // End?
-                        // net_channel.close(end)
-                        break;
+                    Branch::Right((_close, st)) => {
+                        let (tcp, fin) = tcp.close();
+                        let st = net_channel.select_one(st, fin);
+
+                        let (rx, mut recursive) = net_channel.offer_one(st);
+                        let mut tcp = tcp.recv(&rx);
+
+                        loop {
+                            let st = recursive.inner();
+                            match net_channel.offer_two_filtered(
+                                st,
+                                |packet| {
+                                    let packet = TcpPacket::new_checked(&packet).unwrap();
+                                    if packet.fin() {
+                                        Choice::Right
+                                    } else {
+                                        Choice::Left
+                                    }
+                                },
+                                &tcp,
+                            ) {
+                                Branch::Left((ack, st)) => {
+                                    // We have received data from the Client, but we
+                                    // will just throw it away, since our user has
+                                    // closed.
+                                    let ack = tcp.recv_ack(&ack);
+                                    recursive = net_channel.select_one(st, ack);
+                                    continue;
+                                }
+                                Branch::Right((fin, st)) => {
+                                    let ack = tcp.recv_fin(&fin);
+                                    let st = net_channel.select_one(st, ack);
+                                    net_channel.close(st);
+                                    // I think the `End` concept doesn't work since we want
+                                    // to be able to close both channels and only have one
+                                    // End? Maybe we can make it Clone?
+                                    break 'top;
+                                }
+                            }
+                        }
                     }
                 }
             }

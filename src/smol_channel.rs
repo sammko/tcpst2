@@ -35,7 +35,7 @@ where
     where
         M: Message,
         A: Action,
-        F: ChannelFilter<<SmolChannel<'a, R1, R2> as SessionTypedChannel<R1, R2>>::TransportType>,
+        F: ChannelFilter<<Self as SessionTypedChannel<R1, R2>>::TransportType>,
     {
         let (addr, buf) = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
@@ -45,6 +45,37 @@ where
         };
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
         (M::from_net_representation(buf), A::new())
+    }
+
+    pub fn offer_two_filtered<M1, M2, A1, A2, P, F>(
+        &mut self,
+        _o: crate::st::OfferTwo<R2, M1, M2, A1, A2>,
+        picker: P,
+        filter: &F,
+    ) -> crate::st::Branch<(M1, A1), (M2, A2)>
+    where
+        R1: Role,
+        R2: Role,
+        M1: crate::st::Message + 'static,
+        M2: crate::st::Message + 'static,
+        A1: crate::st::Action,
+        A2: crate::st::Action,
+        P: FnOnce(&<Self as SessionTypedChannel<R1, R2>>::TransportType) -> Choice,
+        F: ChannelFilter<<Self as SessionTypedChannel<R1, R2>>::TransportType>,
+    {
+        let (addr, buf) = loop {
+            let (addr, buf) = self.lower.recv().expect("recv failed");
+            if filter.filter(&buf) {
+                break (addr, buf);
+            }
+        };
+        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
+        match picker(&buf) {
+            Choice::Left => crate::st::Branch::Left((M1::from_net_representation(buf), A1::new())),
+            Choice::Right => {
+                crate::st::Branch::Right((M2::from_net_representation(buf), A2::new()))
+            }
+        }
     }
 }
 

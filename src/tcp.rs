@@ -6,7 +6,7 @@ use smoltcp::{
     wire::{IpAddress, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
 
-use crate::smol_channel::{Ack, Syn, SynAck};
+use crate::smol_channel::{Ack, FinAck, Syn, SynAck};
 
 pub struct LocalAddr {
     pub addr: Ipv4Addr,
@@ -42,9 +42,13 @@ pub struct TcpListen {
 // type markers
 pub struct SynRcvd;
 pub struct Established;
+pub struct FinWait1;
+pub struct FinWait2;
 
 impl TcpState for SynRcvd {}
 impl TcpState for Established {}
+impl TcpState for FinWait1 {}
+impl TcpState for FinWait2 {}
 
 pub trait TcpState {} // TODO maybe seal this
 
@@ -162,6 +166,60 @@ where
     }
 }
 
+impl<T> Tcp<T>
+where
+    T: TcpState,
+{
+    fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> Vec<u8> {
+        let control = if fin {
+            TcpControl::Fin
+        } else {
+            TcpControl::None
+        };
+        let repr = TcpRepr {
+            src_port: self.local.port,
+            dst_port: self.remote.port,
+            control,
+            seq_number: self.tcb.snd_nxt,
+            ack_number: Some(self.tcb.rcv_nxt),
+            window_len: self.tcb.rcv_wnd,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None, None, None],
+            payload,
+        };
+        self.tcb.snd_nxt.add_assign(payload.len());
+        if fin {
+            self.tcb.snd_nxt.add_assign(1);
+        }
+
+        let mut buf = vec![0; repr.buffer_len()];
+        let mut packet = TcpPacket::new_unchecked(&mut buf);
+
+        repr.emit(
+            &mut packet,
+            &IpAddress::from(self.local.addr),
+            &IpAddress::from(self.remote.addr),
+            &self.local.checksum_caps,
+        );
+
+        buf
+    }
+
+    fn build_ack(&mut self, payload: &[u8]) -> Ack {
+        Ack {
+            packet: self.build_ack_raw(payload, false),
+        }
+    }
+
+    fn build_fin(&mut self) -> FinAck {
+        FinAck {
+            packet: self.build_ack_raw(&[], true),
+        }
+    }
+}
+
 impl Tcp<SynRcvd> {
     pub fn recv_ack(self, ack: &Ack) -> Tcp<Established> {
         let ack = TcpPacket::new_checked(&ack.packet).unwrap();
@@ -195,63 +253,108 @@ impl Tcp<Established> {
         )
         .unwrap();
 
+        // TODO we need to handle more cases here
+        // and check ACK numbers
+
         if self.tcb.rcv_nxt == ack.seq_number {
             self.tcb.rcv_nxt.add_assign(ack.payload.len());
 
-            let resp = TcpRepr {
-                src_port: self.local.port,
-                dst_port: self.remote.port,
-                control: TcpControl::None,
-                seq_number: self.tcb.snd_nxt,
-                ack_number: Some(self.tcb.rcv_nxt),
-                window_len: self.tcb.rcv_wnd,
-                window_scale: None,
-                max_seg_size: None,
-                sack_permitted: false,
-                sack_ranges: [None, None, None],
-                payload: &[],
-            };
-            let mut resp_data = vec![0; resp.buffer_len()];
-            let mut resp_packet = TcpPacket::new_unchecked(&mut resp_data);
-
-            resp.emit(
-                &mut resp_packet,
-                &IpAddress::from(self.local.addr),
-                &IpAddress::from(self.remote.addr),
-                &self.local.checksum_caps,
-            );
-
-            (Ack { packet: resp_data }, ack.payload)
+            let resp = self.build_ack(&[]);
+            (resp, ack.payload)
         } else {
             todo!("out of order packets not implemented")
         }
     }
 
     pub fn send(&mut self, data: &[u8]) -> Ack {
-        let tx = TcpRepr {
-            src_port: self.local.port,
-            dst_port: self.remote.port,
-            control: TcpControl::None,
-            seq_number: self.tcb.snd_nxt,
-            ack_number: Some(self.tcb.rcv_nxt),
-            window_len: self.tcb.rcv_wnd,
-            window_scale: None,
-            max_seg_size: None,
-            sack_permitted: false,
-            sack_ranges: [None, None, None],
-            payload: data,
-        };
-        self.tcb.snd_nxt.add_assign(data.len());
-        let mut tx_buf = vec![0; tx.buffer_len()];
-        let mut tx_packet = TcpPacket::new_unchecked(&mut tx_buf);
+        self.build_ack(data)
+    }
 
-        tx.emit(
-            &mut tx_packet,
-            &IpAddress::from(self.local.addr),
+    pub fn close(mut self) -> (Tcp<FinWait1>, FinAck) {
+        let fin = self.build_fin();
+        (
+            Tcp {
+                local: self.local,
+                remote: self.remote,
+                tcb: self.tcb,
+                _marker: PhantomData,
+            },
+            fin,
+        )
+    }
+}
+
+impl Tcp<FinWait1> {
+    pub fn recv(self, ack: &Ack) -> Tcp<FinWait2> {
+        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
+        let ack = TcpRepr::parse(
+            &ack,
             &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
             &self.local.checksum_caps,
-        );
+        )
+        .unwrap();
 
-        Ack { packet: tx_buf }
+        if ack.payload.len() > 0 {
+            panic!("got data in FIN_WAIT_1");
+        }
+
+        if ack.ack_number == Some(self.tcb.snd_nxt) {
+            // ACK of our FIN, we can transition to FIN_WAIT_2
+            Tcp {
+                local: self.local,
+                remote: self.remote,
+                tcb: self.tcb,
+                _marker: PhantomData,
+            }
+        } else {
+            todo!("out of order packets not implemented")
+        }
+    }
+}
+
+impl Tcp<FinWait2> {
+    pub fn recv_ack(&mut self, _ack: &Ack) -> Ack {
+        let ack = TcpPacket::new_checked(&_ack.packet).unwrap();
+        let ack = TcpRepr::parse(
+            &ack,
+            &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
+            &self.local.checksum_caps,
+        )
+        .unwrap();
+
+        if Some(self.tcb.snd_nxt) != ack.ack_number {
+            warn!("got out of order ACK");
+        }
+
+        if self.tcb.rcv_nxt == ack.seq_number {
+            self.tcb.rcv_nxt.add_assign(ack.payload.len());
+        } else {
+            todo!("out of order packets not implemented")
+        }
+
+        self.build_ack(&[])
+    }
+
+    pub fn recv_fin(mut self, fin: &FinAck) -> Ack {
+        let fin = TcpPacket::new_checked(&fin.packet).unwrap();
+        let fin = TcpRepr::parse(
+            &fin,
+            &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
+            &self.local.checksum_caps,
+        )
+        .unwrap();
+
+        if fin.seq_number == self.tcb.rcv_nxt {
+            self.tcb.rcv_nxt.add_assign(1);
+        } else {
+            todo!("out of order packets not implemented")
+        }
+
+        // TODO check stuff
+
+        self.build_ack(&[])
     }
 }
