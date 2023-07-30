@@ -9,7 +9,7 @@ use smoltcp::wire::TcpPacket;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
-use tcpst2::st::{Action, Branch, Choice, SessionTypedChannel};
+use tcpst2::st::{Action, Branch, Choice};
 use tcpst2::tcp::{LocalAddr, TcpClosed};
 use tcpst2::{
     RoleClientSystem, RoleServerSystem, RoleServerUser, ServerSystemSessionType,
@@ -179,7 +179,7 @@ fn main() -> Result<()> {
                                 let (tcp, fin) = tcp.close();
                                 let st = net_channel.select_one(st, fin);
 
-                                let (rx, mut recursive) = net_channel.offer_one(st);
+                                let (rx, mut recursive) = net_channel.offer_one_filtered(st, &tcp);
                                 let mut tcp = tcp.recv(&rx);
 
                                 loop {

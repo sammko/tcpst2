@@ -16,12 +16,14 @@ use std::marker::PhantomData;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::{
-    st::{
-        Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
-        SessionTypedChannel,
-    },
-    st_macros::empty_message,
+    st::{Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo},
+    st_macros::empty_cb_message,
 };
+
+pub trait CrossbeamMessage: Message {
+    fn to_net_representation(self) -> Vec<u8>;
+    fn from_net_representation(packet: Vec<u8>) -> Self;
+}
 
 /// [CrossBeamRoleChannel] is a session-typed communication channel that uses crossbeam channels under the hood.
 /// [CrossBeamRoleChannel] behaves as any other session-typed channels and implements [SessionTypedChannel].
@@ -48,18 +50,10 @@ where
             phantom: PhantomData::default(),
         }
     }
-}
 
-impl<R1, R2> SessionTypedChannel<R1, R2> for CrossBeamRoleChannel<R1, R2>
-where
-    R1: Role,
-    R2: Role,
-{
-    type TransportType = Vec<u8>;
-
-    fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
+    pub fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
     where
-        M: Message,
+        M: CrossbeamMessage,
         A: Action,
         R1: Role,
         R2: Role,
@@ -70,9 +64,9 @@ where
         )
     }
 
-    fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
+    pub fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
     where
-        M: Message,
+        M: CrossbeamMessage,
         A: Action,
         R1: Role,
         R2: Role,
@@ -81,7 +75,7 @@ where
         A::new()
     }
 
-    fn offer_two<M1, M2, A1, A2, F>(
+    pub fn offer_two<M1, M2, A1, A2, F>(
         &mut self,
         _o: OfferTwo<R2, M1, M2, A1, A2>,
         picker: F,
@@ -89,11 +83,11 @@ where
     where
         R1: Role,
         R2: Role,
-        M1: Message,
-        M2: Message,
+        M1: CrossbeamMessage,
+        M2: CrossbeamMessage,
         A1: Action,
         A2: Action,
-        F: FnOnce(&Self::TransportType) -> Choice,
+        F: FnOnce(&Vec<u8>) -> Choice,
     {
         let data = self.recv.recv().unwrap();
         let choice = picker(&data);
@@ -103,12 +97,16 @@ where
         }
     }
 
-    fn select_left<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M1) -> A1
+    pub fn select_left<M1, M2, A1, A2>(
+        &mut self,
+        _o: SelectTwo<R2, M1, M2, A1, A2>,
+        message: M1,
+    ) -> A1
     where
         R1: Role,
         R2: Role,
-        M1: Message,
-        M2: Message,
+        M1: CrossbeamMessage,
+        M2: CrossbeamMessage,
         A1: Action,
         A2: Action,
     {
@@ -116,12 +114,16 @@ where
         A1::new()
     }
 
-    fn select_right<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M2) -> A2
+    pub fn select_right<M1, M2, A1, A2>(
+        &mut self,
+        _o: SelectTwo<R2, M1, M2, A1, A2>,
+        message: M2,
+    ) -> A2
     where
         R1: Role,
         R2: Role,
-        M1: Message,
-        M2: Message,
+        M1: CrossbeamMessage,
+        M2: CrossbeamMessage,
         A1: Action,
         A2: Action,
     {
@@ -129,15 +131,15 @@ where
         A2::new()
     }
 
-    fn close(self, _end: End) {
+    pub fn close(self, _end: End) {
         drop(self);
     }
 }
 
-empty_message!(Open);
-empty_message!(TcbCreated);
-empty_message!(Connected);
-empty_message!(Close);
+empty_cb_message!(Open);
+empty_cb_message!(TcbCreated);
+empty_cb_message!(Connected);
+empty_cb_message!(Close);
 
 const MAGIC_DATA: u8 = 1;
 
@@ -145,7 +147,8 @@ pub struct Data {
     pub data: Vec<u8>,
 }
 
-impl Message for Data {
+impl Message for Data {}
+impl CrossbeamMessage for Data {
     fn to_net_representation(self) -> Vec<u8> {
         let mut data = vec![MAGIC_DATA];
         data.extend(self.data);

@@ -1,7 +1,8 @@
-macro_rules! empty_message {
+macro_rules! empty_cb_message {
     ($name:ident) => {
         pub struct $name;
-        impl Message for $name {
+        impl Message for $name {}
+        impl CrossbeamMessage for $name {
             fn to_net_representation(self) -> Vec<u8> {
                 Vec::new()
             }
@@ -11,7 +12,7 @@ macro_rules! empty_message {
         }
     };
 }
-pub(crate) use empty_message;
+pub(crate) use empty_cb_message;
 
 macro_rules! Role {
     (pub $name:ident) => {

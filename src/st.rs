@@ -22,8 +22,8 @@ pub trait Action {
 pub trait Role {}
 
 pub trait Message {
-    fn to_net_representation(self) -> Vec<u8>;
-    fn from_net_representation(packet: Vec<u8>) -> Self;
+    // fn to_net_representation(self) -> Vec<u8>;
+    // fn from_net_representation(packet: Vec<u8>) -> Self;
 }
 
 // Session action types
@@ -155,65 +155,4 @@ impl Action for End {
     {
         End {}
     }
-}
-
-pub trait SessionTypedChannel<R1, R2> {
-    type TransportType;
-
-    #[must_use]
-    fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
-    where
-        M: Message,
-        A: Action,
-        R1: Role,
-        R2: Role;
-
-    #[must_use]
-    fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
-    where
-        M: Message,
-        A: Action,
-        R1: Role,
-        R2: Role;
-
-    #[must_use]
-    fn offer_two<M1, M2, A1, A2, F>(
-        &mut self,
-        _o: OfferTwo<R2, M1, M2, A1, A2>,
-        picker: F,
-    ) -> Branch<(M1, A1), (M2, A2)>
-    where
-        R1: Role,
-        R2: Role,
-        M1: Message,
-        M2: Message,
-        A1: Action,
-        A2: Action,
-        F: FnOnce(&Self::TransportType) -> Choice;
-
-    #[must_use]
-    fn select_left<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M1) -> A1
-    where
-        R1: Role,
-        R2: Role,
-        M1: Message,
-        M2: Message,
-        A1: Action,
-        A2: Action;
-
-    #[must_use]
-    fn select_right<M1, M2, A1, A2>(
-        &mut self,
-        _o: SelectTwo<R2, M1, M2, A1, A2>,
-        message: M2,
-    ) -> A2
-    where
-        R1: Role,
-        R2: Role,
-        M1: Message,
-        M2: Message,
-        A1: Action,
-        A2: Action;
-
-    fn close(self, end: End);
 }

@@ -78,9 +78,8 @@ impl TcpClosed {
 
 impl TcpListen {
     pub fn recv_syn(self, remote: Ipv4Addr, syn: &Syn) -> (Tcp<SynRcvd>, SynAck) {
-        let syn = TcpPacket::new_checked(&syn.packet).unwrap();
         let syn = TcpRepr::parse(
-            &syn,
+            &TcpPacket::new_unchecked(syn.packet.as_ref()),
             &IpAddress::from(remote),
             &IpAddress::from(self.local.addr),
             &self.local.checksum_caps,

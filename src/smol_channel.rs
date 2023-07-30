@@ -4,12 +4,14 @@ use smoltcp::wire::{Ipv4Address, TcpPacket};
 
 use crate::{
     smol_lower::SmolLower,
-    st::{
-        Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
-        SessionTypedChannel,
-    },
+    st::{Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo},
     tcp::ChannelFilter,
 };
+
+pub trait SmolMessage: Message {
+    fn from_net_representation(buf: Vec<u8>) -> Self;
+    fn to_net_representation(self) -> Vec<u8>;
+}
 
 pub struct SmolChannel<'a, R1, R2>
 where
@@ -36,9 +38,9 @@ where
 
     pub fn offer_one_filtered<M, A, F>(&mut self, _o: OfferOne<R2, M, A>, filter: &F) -> (M, A)
     where
-        M: Message,
+        M: SmolMessage,
         A: Action,
-        F: ChannelFilter<<Self as SessionTypedChannel<R1, R2>>::TransportType>,
+        F: ChannelFilter<Vec<u8>>,
     {
         let (addr, buf) = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
@@ -59,12 +61,12 @@ where
     where
         R1: Role,
         R2: Role,
-        M1: Message,
-        M2: Message,
+        M1: SmolMessage,
+        M2: SmolMessage,
         A1: Action,
         A2: Action,
-        P: FnOnce(&<Self as SessionTypedChannel<R1, R2>>::TransportType) -> Choice,
-        F: ChannelFilter<<Self as SessionTypedChannel<R1, R2>>::TransportType>,
+        P: FnOnce(&Vec<u8>) -> Choice,
+        F: ChannelFilter<Vec<u8>>,
     {
         let (addr, buf) = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
@@ -78,30 +80,10 @@ where
             Choice::Right => Branch::Right((M2::from_net_representation(buf), A2::new())),
         }
     }
-}
 
-impl<R1, R2> SessionTypedChannel<R1, R2> for SmolChannel<'_, R1, R2>
-where
-    R1: Role,
-    R2: Role,
-{
-    type TransportType = Vec<u8>;
-
-    fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
+    pub fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
     where
-        M: Message,
-        A: Action,
-        R1: Role,
-        R2: Role,
-    {
-        let (addr, buf) = self.lower.recv().expect("recv failed");
-        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
-        (M::from_net_representation(buf), A::new())
-    }
-
-    fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
-    where
-        M: Message,
+        M: SmolMessage,
         A: Action,
         R1: Role,
         R2: Role,
@@ -113,34 +95,16 @@ where
         A::new()
     }
 
-    fn offer_two<M1, M2, A1, A2, F>(
+    pub fn select_left<M1, M2, A1, A2>(
         &mut self,
-        _o: OfferTwo<R2, M1, M2, A1, A2>,
-        picker: F,
-    ) -> Branch<(M1, A1), (M2, A2)>
+        _o: SelectTwo<R2, M1, M2, A1, A2>,
+        message: M1,
+    ) -> A1
     where
         R1: Role,
         R2: Role,
-        M1: Message,
-        M2: Message,
-        A1: Action,
-        A2: Action,
-        F: FnOnce(&Self::TransportType) -> Choice,
-    {
-        let (addr, buf) = self.lower.recv().expect("recv failed");
-        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
-        match picker(&buf) {
-            Choice::Left => Branch::Left((M1::from_net_representation(buf), A1::new())),
-            Choice::Right => Branch::Right((M2::from_net_representation(buf), A2::new())),
-        }
-    }
-
-    fn select_left<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M1) -> A1
-    where
-        R1: Role,
-        R2: Role,
-        M1: Message,
-        M2: Message,
+        M1: SmolMessage,
+        M2: SmolMessage,
         A1: Action,
         A2: Action,
     {
@@ -151,12 +115,16 @@ where
         A1::new()
     }
 
-    fn select_right<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M2) -> A2
+    pub fn select_right<M1, M2, A1, A2>(
+        &mut self,
+        _o: SelectTwo<R2, M1, M2, A1, A2>,
+        message: M2,
+    ) -> A2
     where
         R1: Role,
         R2: Role,
-        M1: Message,
-        M2: Message,
+        M1: SmolMessage,
+        M2: SmolMessage,
         A1: Action,
         A2: Action,
     {
@@ -167,7 +135,7 @@ where
         A2::new()
     }
 
-    fn close(self, _end: End) {
+    pub fn close(self, _end: End) {
         drop(self)
     }
 }
@@ -181,15 +149,23 @@ where
 /// a wrong packet. This should ideally be handled by checking
 /// that correct flags are set and returning errors.
 pub struct Syn {
-    pub packet: Vec<u8>,
+    pub packet: TcpPacket<Vec<u8>>,
 }
 
-impl Message for Syn {
+impl Message for Syn {}
+impl SmolMessage for Syn {
     fn to_net_representation(self) -> Vec<u8> {
-        self.packet
+        self.packet.into_inner()
     }
 
     fn from_net_representation(packet: Vec<u8>) -> Self {
+        let packet = TcpPacket::new_checked(packet).expect("invalid packet");
+        if packet.ack() {
+            panic!("invalid SYN packet: ack flag set");
+        }
+        if !packet.syn() {
+            panic!("invalid SYN packet: syn flag not set");
+        }
         Syn { packet }
     }
 }
@@ -206,7 +182,8 @@ pub struct SynAck {
     pub packet: Vec<u8>,
 }
 
-impl Message for SynAck {
+impl Message for SynAck {}
+impl SmolMessage for SynAck {
     fn to_net_representation(self) -> Vec<u8> {
         self.packet
     }
@@ -228,7 +205,8 @@ pub struct Ack {
     pub packet: Vec<u8>,
 }
 
-impl Message for Ack {
+impl Message for Ack {}
+impl SmolMessage for Ack {
     fn to_net_representation(self) -> Vec<u8> {
         self.packet
     }
@@ -250,7 +228,8 @@ pub struct FinAck {
     pub packet: Vec<u8>,
 }
 
-impl Message for FinAck {
+impl Message for FinAck {}
+impl SmolMessage for FinAck {
     fn to_net_representation(self) -> Vec<u8> {
         self.packet
     }
