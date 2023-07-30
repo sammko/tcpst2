@@ -15,15 +15,13 @@ use std::marker::PhantomData;
 
 // Supporting traits
 
-pub trait Action: Send {
-    fn new() -> Self
-    where
-        Self: Sized;
+pub trait Action {
+    fn new() -> Self;
 }
 
 pub trait Role {}
 
-pub trait Message: Send {
+pub trait Message {
     fn to_net_representation(self) -> Vec<u8>;
     fn from_net_representation(packet: Vec<u8>) -> Self;
 }
@@ -43,7 +41,7 @@ impl<R, M, A> Action for OfferOne<R, M, A>
 where
     M: Message,
     A: Action,
-    R: Role + std::marker::Send,
+    R: Role,
 {
     fn new() -> Self
     where
@@ -68,7 +66,7 @@ impl<R, M, A> Action for SelectOne<R, M, A>
 where
     M: Message,
     A: Action,
-    R: Role + std::marker::Send,
+    R: Role,
 {
     fn new() -> Self
     where
@@ -93,7 +91,7 @@ where
 
 impl<R, M1, M2, A1, A2> Action for OfferTwo<R, M1, M2, A1, A2>
 where
-    R: Role + std::marker::Send,
+    R: Role,
     M1: Message,
     M2: Message,
     A1: Action,
@@ -132,7 +130,7 @@ where
 
 impl<R, M1, M2, A1, A2> Action for SelectTwo<R, M1, M2, A1, A2>
 where
-    R: Role + std::marker::Send,
+    R: Role,
     M1: Message,
     M2: Message,
     A1: Action,
@@ -165,8 +163,8 @@ pub trait SessionTypedChannel<R1, R2> {
     #[must_use]
     fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
     where
-        M: Message + 'static,
-        A: Action + 'static,
+        M: Message,
+        A: Action,
         R1: Role,
         R2: Role;
 
@@ -187,8 +185,8 @@ pub trait SessionTypedChannel<R1, R2> {
     where
         R1: Role,
         R2: Role,
-        M1: Message + 'static,
-        M2: Message + 'static,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action,
         F: FnOnce(&Self::TransportType) -> Choice;
@@ -198,8 +196,8 @@ pub trait SessionTypedChannel<R1, R2> {
     where
         R1: Role,
         R2: Role,
-        M1: Message + 'static,
-        M2: Message + 'static,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action;
 
@@ -212,8 +210,8 @@ pub trait SessionTypedChannel<R1, R2> {
     where
         R1: Role,
         R2: Role,
-        M1: Message + 'static,
-        M2: Message + 'static,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action;
 

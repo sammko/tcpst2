@@ -59,8 +59,8 @@ where
 
     fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
     where
-        M: Message + 'static,
-        A: Action + 'static,
+        M: Message,
+        A: Action,
         R1: Role,
         R2: Role,
     {
@@ -89,8 +89,8 @@ where
     where
         R1: Role,
         R2: Role,
-        M1: Message + 'static,
-        M2: Message + 'static,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action,
         F: FnOnce(&Self::TransportType) -> Choice,
@@ -107,8 +107,8 @@ where
     where
         R1: Role,
         R2: Role,
-        M1: Message + 'static,
-        M2: Message + 'static,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action,
     {
@@ -120,8 +120,8 @@ where
     where
         R1: Role,
         R2: Role,
-        M1: Message + 'static,
-        M2: Message + 'static,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action,
     {

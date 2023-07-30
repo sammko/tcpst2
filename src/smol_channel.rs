@@ -1,10 +1,13 @@
 use std::marker::PhantomData;
 
-use smoltcp::wire::Ipv4Address;
+use smoltcp::wire::{Ipv4Address, TcpPacket};
 
 use crate::{
     smol_lower::SmolLower,
-    st::{Action, Choice, Message, OfferOne, Role, SessionTypedChannel},
+    st::{
+        Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo,
+        SessionTypedChannel,
+    },
     tcp::ChannelFilter,
 };
 
@@ -49,17 +52,17 @@ where
 
     pub fn offer_two_filtered<M1, M2, A1, A2, P, F>(
         &mut self,
-        _o: crate::st::OfferTwo<R2, M1, M2, A1, A2>,
+        _o: OfferTwo<R2, M1, M2, A1, A2>,
         picker: P,
         filter: &F,
-    ) -> crate::st::Branch<(M1, A1), (M2, A2)>
+    ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
         R2: Role,
-        M1: crate::st::Message + 'static,
-        M2: crate::st::Message + 'static,
-        A1: crate::st::Action,
-        A2: crate::st::Action,
+        M1: Message,
+        M2: Message,
+        A1: Action,
+        A2: Action,
         P: FnOnce(&<Self as SessionTypedChannel<R1, R2>>::TransportType) -> Choice,
         F: ChannelFilter<<Self as SessionTypedChannel<R1, R2>>::TransportType>,
     {
@@ -71,10 +74,8 @@ where
         };
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
         match picker(&buf) {
-            Choice::Left => crate::st::Branch::Left((M1::from_net_representation(buf), A1::new())),
-            Choice::Right => {
-                crate::st::Branch::Right((M2::from_net_representation(buf), A2::new()))
-            }
+            Choice::Left => Branch::Left((M1::from_net_representation(buf), A1::new())),
+            Choice::Right => Branch::Right((M2::from_net_representation(buf), A2::new())),
         }
     }
 }
@@ -86,10 +87,10 @@ where
 {
     type TransportType = Vec<u8>;
 
-    fn offer_one<M, A>(&mut self, _o: crate::st::OfferOne<R2, M, A>) -> (M, A)
+    fn offer_one<M, A>(&mut self, _o: OfferOne<R2, M, A>) -> (M, A)
     where
-        M: crate::st::Message + 'static,
-        A: crate::st::Action + 'static,
+        M: Message,
+        A: Action,
         R1: Role,
         R2: Role,
     {
@@ -98,10 +99,10 @@ where
         (M::from_net_representation(buf), A::new())
     }
 
-    fn select_one<M, A>(&mut self, _o: crate::st::SelectOne<R2, M, A>, message: M) -> A
+    fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
     where
-        M: crate::st::Message,
-        A: crate::st::Action,
+        M: Message,
+        A: Action,
         R1: Role,
         R2: Role,
     {
@@ -114,40 +115,34 @@ where
 
     fn offer_two<M1, M2, A1, A2, F>(
         &mut self,
-        _o: crate::st::OfferTwo<R2, M1, M2, A1, A2>,
+        _o: OfferTwo<R2, M1, M2, A1, A2>,
         picker: F,
-    ) -> crate::st::Branch<(M1, A1), (M2, A2)>
+    ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
         R2: Role,
-        M1: crate::st::Message + 'static,
-        M2: crate::st::Message + 'static,
-        A1: crate::st::Action,
-        A2: crate::st::Action,
+        M1: Message,
+        M2: Message,
+        A1: Action,
+        A2: Action,
         F: FnOnce(&Self::TransportType) -> Choice,
     {
         let (addr, buf) = self.lower.recv().expect("recv failed");
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
         match picker(&buf) {
-            Choice::Left => crate::st::Branch::Left((M1::from_net_representation(buf), A1::new())),
-            Choice::Right => {
-                crate::st::Branch::Right((M2::from_net_representation(buf), A2::new()))
-            }
+            Choice::Left => Branch::Left((M1::from_net_representation(buf), A1::new())),
+            Choice::Right => Branch::Right((M2::from_net_representation(buf), A2::new())),
         }
     }
 
-    fn select_left<M1, M2, A1, A2>(
-        &mut self,
-        _o: crate::st::SelectTwo<R2, M1, M2, A1, A2>,
-        message: M1,
-    ) -> A1
+    fn select_left<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M1) -> A1
     where
         R1: Role,
         R2: Role,
-        M1: crate::st::Message + 'static,
-        M2: crate::st::Message + 'static,
-        A1: crate::st::Action,
-        A2: crate::st::Action,
+        M1: Message,
+        M2: Message,
+        A1: Action,
+        A2: Action,
     {
         let buf = message.to_net_representation();
         self.lower
@@ -156,18 +151,14 @@ where
         A1::new()
     }
 
-    fn select_right<M1, M2, A1, A2>(
-        &mut self,
-        _o: crate::st::SelectTwo<R2, M1, M2, A1, A2>,
-        message: M2,
-    ) -> A2
+    fn select_right<M1, M2, A1, A2>(&mut self, _o: SelectTwo<R2, M1, M2, A1, A2>, message: M2) -> A2
     where
         R1: Role,
         R2: Role,
-        M1: crate::st::Message + 'static,
-        M2: crate::st::Message + 'static,
-        A1: crate::st::Action,
-        A2: crate::st::Action,
+        M1: Message,
+        M2: Message,
+        A1: Action,
+        A2: Action,
     {
         let buf = message.to_net_representation();
         self.lower
@@ -176,7 +167,7 @@ where
         A2::new()
     }
 
-    fn close(self, _end: crate::st::End) {
+    fn close(self, _end: End) {
         drop(self)
     }
 }

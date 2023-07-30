@@ -1,10 +1,10 @@
-use std::{marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
-
+use anyhow::Result;
 use log::{info, warn};
 use smoltcp::{
     phy::ChecksumCapabilities,
     wire::{IpAddress, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
+use std::{marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
 
 use crate::smol_channel::{Ack, FinAck, Syn, SynAck};
 
