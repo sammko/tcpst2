@@ -88,14 +88,14 @@ impl TcpListen {
         .unwrap();
 
         let iss = TcpSeqNumber(123); // TODO generate random
-        let tcb = Tcb {
+        let mut tcb = Tcb {
             irs: syn.seq_number,
-            rcv_nxt: syn.seq_number + 1,
+            rcv_nxt: syn.seq_number + syn.segment_len(),
             rcv_wnd: syn.window_len,
 
             iss,
             snd_una: iss,
-            snd_nxt: iss + 1,
+            snd_nxt: iss,
             snd_wnd: 0,
         };
 
@@ -112,6 +112,8 @@ impl TcpListen {
             sack_ranges: [None, None, None],
             payload: &[],
         };
+        tcb.snd_nxt.add_assign(resp.segment_len());
+
         let mut resp_data = vec![0; resp.buffer_len()];
         let mut resp_packet = TcpPacket::new_unchecked(&mut resp_data);
         resp.emit(
@@ -193,10 +195,8 @@ where
             sack_ranges: [None, None, None],
             payload,
         };
-        self.tcb.snd_nxt.add_assign(payload.len());
-        if fin {
-            self.tcb.snd_nxt.add_assign(1);
-        }
+
+        self.tcb.snd_nxt.add_assign(repr.segment_len());
 
         let mut buf = vec![0; repr.buffer_len()];
         let mut packet = TcpPacket::new_unchecked(&mut buf);
@@ -261,7 +261,7 @@ impl Tcp<Established> {
         // and check ACK numbers
 
         if self.tcb.rcv_nxt == ack.seq_number {
-            self.tcb.rcv_nxt.add_assign(ack.payload.len());
+            self.tcb.rcv_nxt.add_assign(ack.segment_len());
 
             let resp = self.build_ack(&[]);
             (resp, ack.payload)
@@ -282,7 +282,7 @@ impl Tcp<Established> {
         .unwrap();
 
         if fin.seq_number == self.tcb.rcv_nxt {
-            self.tcb.rcv_nxt.add_assign(fin.payload.len() + 1);
+            self.tcb.rcv_nxt.add_assign(fin.segment_len());
         } else {
             todo!("out of order packets not implemented")
         }
@@ -328,7 +328,7 @@ impl Tcp<FinWait1> {
         )
         .unwrap();
 
-        if ack.payload.len() > 0 {
+        if ack.segment_len() > 0 {
             panic!("got data in FIN_WAIT_1");
         }
 
@@ -362,7 +362,7 @@ impl Tcp<FinWait2> {
         }
 
         if self.tcb.rcv_nxt == ack.seq_number {
-            self.tcb.rcv_nxt.add_assign(ack.payload.len());
+            self.tcb.rcv_nxt.add_assign(ack.segment_len());
         } else {
             todo!("out of order packets not implemented")
         }
