@@ -87,7 +87,7 @@ impl SmolLower<'_> {
         Ok(())
     }
 
-    pub fn recv(&mut self) -> Result<(Ipv4Address, Vec<u8>)> {
+    pub fn recv(&mut self) -> Result<(Ipv4Address, TcpPacket<Vec<u8>>)> {
         loop {
             let timestamp = Instant::now();
 
@@ -104,13 +104,13 @@ impl SmolLower<'_> {
 
                 assert_eq!(ipv4_packet.next_header(), IpProtocol::Tcp);
 
-                let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload())?;
+                let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload().to_owned())?;
 
                 if tcp_packet.dst_port() != self.listen_port {
                     continue;
                 }
 
-                return Ok((ipv4_packet.src_addr(), ipv4_packet.payload().to_owned()));
+                return Ok((ipv4_packet.src_addr(), tcp_packet));
             }
 
             phy_wait(

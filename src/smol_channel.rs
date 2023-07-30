@@ -9,8 +9,8 @@ use crate::{
 };
 
 pub trait SmolMessage: Message {
-    fn from_net_representation(buf: Vec<u8>) -> Self;
-    fn to_net_representation(self) -> Vec<u8>;
+    fn from_packet(buf: TcpPacket<Vec<u8>>) -> Self;
+    fn packet(&self) -> &TcpPacket<Vec<u8>>;
 }
 
 pub struct SmolChannel<'a, R1, R2>
@@ -40,7 +40,7 @@ where
     where
         M: SmolMessage,
         A: Action,
-        F: ChannelFilter<Vec<u8>>,
+        F: ChannelFilter<TcpPacket<Vec<u8>>>,
     {
         let (addr, buf) = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
@@ -49,7 +49,7 @@ where
             }
         };
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
-        (M::from_net_representation(buf), A::new())
+        (M::from_packet(buf), A::new())
     }
 
     pub fn offer_two_filtered<M1, M2, A1, A2, P, F>(
@@ -65,8 +65,8 @@ where
         M2: SmolMessage,
         A1: Action,
         A2: Action,
-        P: FnOnce(&Vec<u8>) -> Choice,
-        F: ChannelFilter<Vec<u8>>,
+        P: FnOnce(&TcpPacket<Vec<u8>>) -> Choice,
+        F: ChannelFilter<TcpPacket<Vec<u8>>>,
     {
         let (addr, buf) = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
@@ -76,8 +76,8 @@ where
         };
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
         match picker(&buf) {
-            Choice::Left => Branch::Left((M1::from_net_representation(buf), A1::new())),
-            Choice::Right => Branch::Right((M2::from_net_representation(buf), A2::new())),
+            Choice::Left => Branch::Left((M1::from_packet(buf), A1::new())),
+            Choice::Right => Branch::Right((M2::from_packet(buf), A2::new())),
         }
     }
 
@@ -88,7 +88,7 @@ where
         R1: Role,
         R2: Role,
     {
-        let buf = message.to_net_representation();
+        let buf = message.packet().as_ref();
         self.lower
             .send(self.remote_addr, &buf)
             .expect("send failed");
@@ -108,7 +108,7 @@ where
         A1: Action,
         A2: Action,
     {
-        let buf = message.to_net_representation();
+        let buf = message.packet().as_ref();
         self.lower
             .send(self.remote_addr, &buf)
             .expect("send failed");
@@ -128,7 +128,7 @@ where
         A1: Action,
         A2: Action,
     {
-        let buf = message.to_net_representation();
+        let buf = message.packet().as_ref();
         self.lower
             .send(self.remote_addr, &buf)
             .expect("send failed");
@@ -140,6 +140,21 @@ where
     }
 }
 
+macro_rules! impl_smol_message {
+    ($name:ident) => {
+        impl Message for $name {}
+        impl SmolMessage for $name {
+            fn packet(&self) -> &TcpPacket<Vec<u8>> {
+                &self.packet
+            }
+
+            fn from_packet(packet: TcpPacket<Vec<u8>>) -> Self {
+                $name { packet }
+            }
+        }
+    };
+}
+
 /// [Syn] is the specific message type for a packet with
 /// the SYN flag set. We assume a well-behaved parser and
 /// leave the parsing implementation to the user. Hence,
@@ -149,26 +164,9 @@ where
 /// a wrong packet. This should ideally be handled by checking
 /// that correct flags are set and returning errors.
 pub struct Syn {
-    pub packet: TcpPacket<Vec<u8>>,
+    packet: TcpPacket<Vec<u8>>,
 }
-
-impl Message for Syn {}
-impl SmolMessage for Syn {
-    fn to_net_representation(self) -> Vec<u8> {
-        self.packet.into_inner()
-    }
-
-    fn from_net_representation(packet: Vec<u8>) -> Self {
-        let packet = TcpPacket::new_checked(packet).expect("invalid packet");
-        if packet.ack() {
-            panic!("invalid SYN packet: ack flag set");
-        }
-        if !packet.syn() {
-            panic!("invalid SYN packet: syn flag not set");
-        }
-        Syn { packet }
-    }
-}
+impl_smol_message!(Syn);
 
 /// [SynAck] is the specific message type for a packet with
 /// the SYN flag set. We assume a well-behaved parser and
@@ -179,19 +177,9 @@ impl SmolMessage for Syn {
 /// a wrong packet. This should ideally be handled by checking
 /// that correct flags are set and returning errors.
 pub struct SynAck {
-    pub packet: Vec<u8>,
+    pub packet: TcpPacket<Vec<u8>>,
 }
-
-impl Message for SynAck {}
-impl SmolMessage for SynAck {
-    fn to_net_representation(self) -> Vec<u8> {
-        self.packet
-    }
-
-    fn from_net_representation(packet: Vec<u8>) -> Self {
-        SynAck { packet }
-    }
-}
+impl_smol_message!(SynAck);
 
 /// [Ack] is the specific message type for a packet with
 /// the SYN flag set. We assume a well-behaved parser and
@@ -202,19 +190,9 @@ impl SmolMessage for SynAck {
 /// a wrong packet. This should ideally be handled by checking
 /// that correct flags are set and returning errors.
 pub struct Ack {
-    pub packet: Vec<u8>,
+    pub packet: TcpPacket<Vec<u8>>,
 }
-
-impl Message for Ack {}
-impl SmolMessage for Ack {
-    fn to_net_representation(self) -> Vec<u8> {
-        self.packet
-    }
-
-    fn from_net_representation(packet: Vec<u8>) -> Self {
-        Ack { packet }
-    }
-}
+impl_smol_message!(Ack);
 
 /// [FinAck] is the specific message type for a packet with
 /// the SYN flag set. We assume a well-behaved parser and
@@ -225,16 +203,6 @@ impl SmolMessage for Ack {
 /// a wrong packet. This should ideally be handled by checking
 /// that correct flags are set and returning errors.
 pub struct FinAck {
-    pub packet: Vec<u8>,
+    pub packet: TcpPacket<Vec<u8>>,
 }
-
-impl Message for FinAck {}
-impl SmolMessage for FinAck {
-    fn to_net_representation(self) -> Vec<u8> {
-        self.packet
-    }
-
-    fn from_net_representation(packet: Vec<u8>) -> Self {
-        FinAck { packet }
-    }
-}
+impl_smol_message!(FinAck);

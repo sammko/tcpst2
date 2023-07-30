@@ -6,7 +6,7 @@ use smoltcp::{
 };
 use std::{marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
 
-use crate::smol_channel::{Ack, FinAck, Syn, SynAck};
+use crate::smol_channel::{Ack, FinAck, SmolMessage, Syn, SynAck};
 
 pub struct LocalAddr {
     pub addr: Ipv4Addr,
@@ -21,6 +21,28 @@ pub struct RemoteAddr {
 pub trait ChannelFilter<T> {
     fn filter(&self, packet: &T) -> bool;
 }
+
+// type markers
+pub struct SynRcvd;
+pub struct Established;
+pub struct FinWait1;
+pub struct FinWait2;
+pub struct CloseWait;
+pub struct LastAck;
+
+mod tcp_state {
+    use super::*;
+
+    impl TcpState for SynRcvd {}
+    impl TcpState for Established {}
+    impl TcpState for FinWait1 {}
+    impl TcpState for FinWait2 {}
+    impl TcpState for CloseWait {}
+    impl TcpState for LastAck {}
+
+    pub trait TcpState {}
+}
+use tcp_state::TcpState;
 
 #[allow(dead_code)]
 struct Tcb {
@@ -38,24 +60,6 @@ pub struct TcpClosed;
 pub struct TcpListen {
     local: LocalAddr,
 }
-
-// type markers
-pub struct SynRcvd;
-pub struct Established;
-pub struct FinWait1;
-pub struct FinWait2;
-pub struct CloseWait;
-pub struct LastAck;
-
-impl TcpState for SynRcvd {}
-impl TcpState for Established {}
-impl TcpState for FinWait1 {}
-impl TcpState for FinWait2 {}
-impl TcpState for CloseWait {}
-impl TcpState for LastAck {}
-
-pub trait TcpState {} // TODO maybe seal this
-
 pub struct Tcp<State>
 where
     State: TcpState,
@@ -79,7 +83,7 @@ impl TcpClosed {
 impl TcpListen {
     pub fn recv_syn(self, remote: Ipv4Addr, syn: &Syn) -> (Tcp<SynRcvd>, SynAck) {
         let syn = TcpRepr::parse(
-            &TcpPacket::new_unchecked(syn.packet.as_ref()),
+            &TcpPacket::new_unchecked(syn.packet().as_ref()),
             &IpAddress::from(remote),
             &IpAddress::from(self.local.addr),
             &self.local.checksum_caps,
@@ -114,9 +118,8 @@ impl TcpListen {
         tcb.snd_nxt.add_assign(resp.segment_len());
 
         let mut resp_data = vec![0; resp.buffer_len()];
-        let mut resp_packet = TcpPacket::new_unchecked(&mut resp_data);
         resp.emit(
-            &mut resp_packet,
+            &mut TcpPacket::new_unchecked(&mut resp_data),
             &IpAddress::from(self.local.addr),
             &IpAddress::from(remote),
             &self.local.checksum_caps,
@@ -132,36 +135,39 @@ impl TcpListen {
                 tcb,
                 _marker: PhantomData,
             },
-            SynAck { packet: resp_data },
+            SynAck {
+                packet: TcpPacket::new_unchecked(resp_data),
+            },
         )
     }
 }
 
-impl ChannelFilter<Vec<u8>> for TcpListen {
-    fn filter(&self, packet: &Vec<u8>) -> bool {
+impl<T> ChannelFilter<TcpPacket<T>> for TcpListen
+where
+    T: AsRef<[u8]>,
+{
+    fn filter(&self, packet: &TcpPacket<T>) -> bool {
         // This is a bit janky but it works for now
-        if let Ok(tcp) = TcpPacket::new_checked(packet) {
-            if tcp.syn() == true
-                && tcp.ack() == false
-                && tcp.rst() == false
-                && tcp.fin() == false
-                && tcp.psh() == false
-            {
-                return true;
-            }
+        if packet.syn() == true
+            && packet.ack() == false
+            && packet.rst() == false
+            && packet.fin() == false
+            && packet.psh() == false
+        {
+            true
+        } else {
+            warn!("Dropping non-SYN");
+            false
         }
-        warn!("Dropping non-SYN");
-        false
     }
 }
 
-impl<T> ChannelFilter<Vec<u8>> for Tcp<T>
+impl<T, U> ChannelFilter<TcpPacket<U>> for Tcp<T>
 where
     T: TcpState,
+    U: AsRef<[u8]>,
 {
-    fn filter(&self, packet: &Vec<u8>) -> bool {
-        let packet = TcpPacket::new_checked(packet).unwrap();
-
+    fn filter(&self, packet: &TcpPacket<U>) -> bool {
         if packet.dst_port() == self.local.port && packet.src_port() == self.remote.port {
             true
         } else {
@@ -175,7 +181,7 @@ impl<T> Tcp<T>
 where
     T: TcpState,
 {
-    fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> Vec<u8> {
+    fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> TcpPacket<Vec<u8>> {
         let control = if fin {
             TcpControl::Fin
         } else {
@@ -207,7 +213,7 @@ where
             &self.local.checksum_caps,
         );
 
-        buf
+        TcpPacket::new_unchecked(buf)
     }
 
     fn build_ack(&mut self, payload: &[u8]) -> Ack {
@@ -220,6 +226,14 @@ where
         FinAck {
             packet: self.build_ack_raw(&[], true),
         }
+    }
+
+    fn is_acceptable(&self, _packet: &TcpRepr) -> bool {
+        todo!()
+    }
+
+    fn accept(&mut self, _packet: &TcpRepr) -> Result<()> {
+        todo!()
     }
 }
 

@@ -5,7 +5,6 @@ use anyhow::Result;
 use crossbeam_channel::unbounded;
 use log::info;
 
-use smoltcp::wire::TcpPacket;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
@@ -137,7 +136,6 @@ fn main() -> Result<()> {
                 match net_channel.offer_two_filtered(
                     st,
                     |packet| {
-                        let packet = TcpPacket::new_checked(&packet).unwrap();
                         if packet.fin() {
                             Choice::Right
                         } else {
@@ -187,7 +185,6 @@ fn main() -> Result<()> {
                                     match net_channel.offer_two_filtered(
                                         st,
                                         |packet| {
-                                            let packet = TcpPacket::new_checked(&packet).unwrap();
                                             if packet.fin() {
                                                 Choice::Right
                                             } else {
