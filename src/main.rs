@@ -146,7 +146,7 @@ fn main() -> Result<()> {
                 ) {
                     Branch::Left((rx, st)) => {
                         let (resp, data) = tcp.recv(&rx);
-                        let st = net_channel.select_one(st, resp);
+                        let st = net_channel.select_one(st, resp.expect("not represented by ST"));
 
                         info!("Got {:?} bytes", data.len());
 

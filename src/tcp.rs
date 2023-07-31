@@ -1,12 +1,11 @@
-use anyhow::Result;
 use log::{info, warn};
 use smoltcp::{
     phy::ChecksumCapabilities,
     wire::{IpAddress, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
-use std::{marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
+use std::{any::TypeId, marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
 
-use crate::smol_channel::{Ack, FinAck, SmolMessage, Syn, SynAck};
+use crate::smol_channel::{Ack, FinAck, Rst, SmolMessage, Syn, SynAck};
 
 pub struct LocalAddr {
     pub addr: Ipv4Addr,
@@ -81,6 +80,8 @@ impl TcpClosed {
 }
 
 impl TcpListen {
+    // TODO look at unifying this with Tcp<T>.
+
     pub fn recv_syn(self, remote: Ipv4Addr, syn: &Syn) -> (Tcp<SynRcvd>, SynAck) {
         let syn = TcpRepr::parse(
             &TcpPacket::new_unchecked(syn.packet().as_ref()),
@@ -177,9 +178,16 @@ where
     }
 }
 
+#[must_use]
+pub enum Reaction<'a> {
+    Acceptable(Option<Ack>, Option<&'a [u8]>),
+    NotAcceptable(Option<Ack>),
+    Reset(Option<Rst>),
+}
+
 impl<T> Tcp<T>
 where
-    T: TcpState,
+    T: TcpState + 'static,
 {
     fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> TcpPacket<Vec<u8>> {
         let control = if fin {
@@ -228,88 +236,168 @@ where
         }
     }
 
-    fn is_acceptable(&self, _packet: &TcpRepr) -> bool {
-        todo!()
+    /// Determine if a segment's sequence number and length are acceptable
+    /// under the current receive window.
+    ///
+    /// Link: <https://datatracker.ietf.org/doc/html/rfc9293#section-3.10.7.4>
+    fn is_seg_acceptable(&self, seg: &TcpRepr) -> bool {
+        let seg_seq = seg.seq_number;
+        let seg_len = seg.segment_len();
+        let rcv_nxt = self.tcb.rcv_nxt;
+        let rcv_wnd = usize::from(self.tcb.rcv_wnd);
+
+        if seg.segment_len() == 0 {
+            if rcv_wnd == 0 {
+                seg_seq == rcv_nxt
+            } else {
+                rcv_nxt <= seg_seq && seg_seq < rcv_nxt + rcv_wnd
+            }
+        } else {
+            if self.tcb.rcv_wnd == 0 {
+                false
+            } else {
+                (rcv_nxt <= seg_seq && seg_seq < rcv_nxt + rcv_wnd)
+                    || (rcv_nxt <= seg_seq + seg_len - 1
+                        && seg_seq + seg_len - 1 < rcv_nxt + rcv_wnd)
+            }
+        }
     }
 
-    fn accept(&mut self, _packet: &TcpRepr) -> Result<()> {
-        todo!()
-    }
-}
+    fn accept<'a>(&mut self, seg: &TcpRepr<'a>) -> Reaction<'a> {
+        if !self.is_seg_acceptable(seg) {
+            let reply = if seg.control == TcpControl::Rst {
+                None
+            } else {
+                Some(self.build_ack(&[]))
+            };
+            return Reaction::NotAcceptable(reply);
+        }
 
-impl Tcp<SynRcvd> {
-    pub fn recv_ack(self, ack: &Ack) -> Tcp<Established> {
-        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
-        let ack = TcpRepr::parse(
-            &ack,
+        if seg.control == TcpControl::Rst {
+            if seg.seq_number == self.tcb.rcv_nxt {
+                // clean reset
+                return Reaction::Reset(None);
+            }
+            // challenge ACK
+            return Reaction::NotAcceptable(Some(self.build_ack(&[])));
+        }
+
+        // ignore Security
+
+        if seg.control == TcpControl::Syn {
+            // TODO not sure if this is right
+            return Reaction::NotAcceptable(Some(self.build_ack(&[])));
+        }
+
+        match seg.ack_number {
+            Some(ack_number) => {
+                // TODO RFC 5961
+
+                // SYN-RECEIVED STATE
+                if TypeId::of::<T>() == TypeId::of::<SynRcvd>() {
+                    if self.tcb.snd_una < ack_number && ack_number <= self.tcb.snd_nxt {
+                        // TODO RFC 5961
+                        self.tcb.snd_wnd = seg.window_len;
+                        // self.tcb.snd_wl1 = seg.seq_number;
+                        // self.tcb.snd_wl2 = ack_number;
+                        return Reaction::Acceptable(None, None);
+                    } else {
+                        return Reaction::NotAcceptable(None);
+                    }
+                }
+
+                if self.tcb.snd_una < ack_number && ack_number <= self.tcb.snd_nxt {
+                    self.tcb.snd_una = ack_number;
+                } else if ack_number > self.tcb.snd_nxt {
+                    return Reaction::NotAcceptable(Some(self.build_ack(&[])));
+                }
+
+                // SND.UNA =< SEG.ACK =< SND.NXT
+                if self.tcb.snd_una <= ack_number && ack_number <= self.tcb.snd_nxt {
+                    warn!("TODO should update send window")
+                }
+
+                // ignore URG
+
+                self.tcb.rcv_nxt += seg.segment_len();
+                Reaction::Acceptable(
+                    if seg.segment_len() > 0 {
+                        Some(self.build_ack(&[]))
+                    } else {
+                        None
+                    },
+                    if seg.payload.len() > 0 {
+                        Some(seg.payload)
+                    } else {
+                        None
+                    },
+                )
+            }
+            None => Reaction::NotAcceptable(None),
+        }
+    }
+
+    fn parse<'a, M>(&self, packet: &'a M) -> TcpRepr<'a>
+    where
+        M: SmolMessage,
+    {
+        TcpRepr::parse(
+            &TcpPacket::new_unchecked(packet.packet().as_ref()),
             &IpAddress::from(self.remote.addr),
             &IpAddress::from(self.local.addr),
             &self.local.checksum_caps,
         )
-        .unwrap();
+        .unwrap()
+    }
+}
 
-        info!("got ack: {:?}", ack);
-
-        Tcp {
-            local: self.local,
-            remote: self.remote,
-            tcb: self.tcb,
-            _marker: PhantomData,
+impl Tcp<SynRcvd> {
+    pub fn recv_ack(mut self, ack: &Ack) -> Tcp<Established> {
+        let ack = self.parse(ack);
+        match self.accept(&ack) {
+            Reaction::Acceptable(None, None) => {
+                info!("SynRcvd: got ack: {:?}", ack);
+                Tcp {
+                    local: self.local,
+                    remote: self.remote,
+                    tcb: self.tcb,
+                    _marker: PhantomData,
+                }
+            }
+            Reaction::Acceptable(_, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
     }
 }
 
 impl Tcp<Established> {
-    pub fn recv<'a>(&mut self, ack: &'a Ack) -> (Ack, &'a [u8]) {
-        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
-        let ack = TcpRepr::parse(
-            &ack,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        // TODO we need to handle more cases here
-        // and check ACK numbers
-
-        if self.tcb.rcv_nxt == ack.seq_number {
-            self.tcb.rcv_nxt.add_assign(ack.segment_len());
-
-            let resp = self.build_ack(&[]);
-            (resp, ack.payload)
-        } else {
-            todo!("out of order packets not implemented")
+    pub fn recv<'a>(&mut self, ack: &'a Ack) -> (Option<Ack>, &'a [u8]) {
+        let ack: TcpRepr<'a> = self.parse(ack);
+        match self.accept(&ack) {
+            Reaction::Acceptable(resp, Some(data)) => (resp, data),
+            Reaction::Acceptable(resp, None) => (resp, &[]),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
     }
 
     pub fn recv_fin(mut self, fin: &FinAck) -> (Tcp<CloseWait>, Ack) {
-        // TODO also handle data here
-        let fin = TcpPacket::new_checked(&fin.packet).unwrap();
-        let fin = TcpRepr::parse(
-            &fin,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        if fin.seq_number == self.tcb.rcv_nxt {
-            self.tcb.rcv_nxt.add_assign(fin.segment_len());
-        } else {
-            todo!("out of order packets not implemented")
+        let fin = self.parse(fin);
+        match self.accept(&fin) {
+            Reaction::Acceptable(Some(ack), None) => (
+                Tcp {
+                    local: self.local,
+                    remote: self.remote,
+                    tcb: self.tcb,
+                    _marker: PhantomData,
+                },
+                ack,
+            ),
+            Reaction::Acceptable(_, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
-
-        let ack = self.build_ack(&[]);
-        (
-            Tcp {
-                local: self.local,
-                remote: self.remote,
-                tcb: self.tcb,
-                _marker: PhantomData,
-            },
-            ack,
-        )
     }
 
     pub fn send(&mut self, data: &[u8]) -> Ack {
@@ -331,93 +419,52 @@ impl Tcp<Established> {
 }
 
 impl Tcp<FinWait1> {
-    pub fn recv(self, ack: &Ack) -> Tcp<FinWait2> {
-        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
-        let ack = TcpRepr::parse(
-            &ack,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        if ack.segment_len() > 0 {
-            panic!("got data in FIN_WAIT_1");
-        }
-
-        if ack.ack_number == Some(self.tcb.snd_nxt) {
-            // ACK of our FIN, we can transition to FIN_WAIT_2
-            Tcp {
+    pub fn recv(mut self, ack: &Ack) -> Tcp<FinWait2> {
+        let ack = self.parse(ack);
+        match self.accept(&ack) {
+            Reaction::Acceptable(None, None) => Tcp {
                 local: self.local,
                 remote: self.remote,
                 tcb: self.tcb,
                 _marker: PhantomData,
-            }
-        } else {
-            todo!("out of order packets not implemented")
+            },
+            Reaction::Acceptable(_, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
     }
 }
 
 impl Tcp<FinWait2> {
-    pub fn recv_ack(&mut self, _ack: &Ack) -> Ack {
-        let ack = TcpPacket::new_checked(&_ack.packet).unwrap();
-        let ack = TcpRepr::parse(
-            &ack,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        if Some(self.tcb.snd_nxt) != ack.ack_number {
-            warn!("got out of order ACK");
+    pub fn recv_ack(&mut self, ack: &Ack) -> Ack {
+        let ack = self.parse(ack);
+        match self.accept(&ack) {
+            Reaction::Acceptable(Some(ack), _) => ack,
+            Reaction::Acceptable(None, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
-
-        if self.tcb.rcv_nxt == ack.seq_number {
-            self.tcb.rcv_nxt.add_assign(ack.segment_len());
-        } else {
-            todo!("out of order packets not implemented")
-        }
-
-        self.build_ack(&[])
     }
 
     pub fn recv_fin(mut self, fin: &FinAck) -> Ack {
-        let fin = TcpPacket::new_checked(&fin.packet).unwrap();
-        let fin = TcpRepr::parse(
-            &fin,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        if fin.seq_number == self.tcb.rcv_nxt {
-            self.tcb.rcv_nxt.add_assign(1);
-        } else {
-            todo!("out of order packets not implemented")
+        let fin = self.parse(fin);
+        match self.accept(&fin) {
+            Reaction::Acceptable(Some(ack), _) => ack,
+            Reaction::Acceptable(None, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
-
-        // TODO check stuff
-
-        self.build_ack(&[])
     }
 }
 
 impl Tcp<CloseWait> {
     pub fn recv_ack(&mut self, ack: &Ack) {
-        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
-        let ack = TcpRepr::parse(
-            &ack,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        if Some(self.tcb.snd_nxt) != ack.ack_number {
-            warn!("got out of order ACK");
+        let ack = self.parse(ack);
+        match self.accept(&ack) {
+            Reaction::Acceptable(None, None) => {}
+            Reaction::Acceptable(_, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
     }
 
@@ -440,18 +487,13 @@ impl Tcp<CloseWait> {
 }
 
 impl Tcp<LastAck> {
-    pub fn recv_ack(self, ack: &Ack) {
-        let ack = TcpPacket::new_checked(&ack.packet).unwrap();
-        let ack = TcpRepr::parse(
-            &ack,
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
-        )
-        .unwrap();
-
-        if Some(self.tcb.snd_nxt) != ack.ack_number {
-            warn!("got out of order ACK");
+    pub fn recv_ack(mut self, ack: &Ack) {
+        let ack = self.parse(ack);
+        match self.accept(&ack) {
+            Reaction::Acceptable(None, None) => {}
+            Reaction::Acceptable(_, _) => todo!(),
+            Reaction::NotAcceptable(_) => todo!(),
+            Reaction::Reset(_) => todo!(),
         }
     }
 }

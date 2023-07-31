@@ -206,3 +206,8 @@ pub struct FinAck {
     pub packet: TcpPacket<Vec<u8>>,
 }
 impl_smol_message!(FinAck);
+
+pub struct Rst {
+    pub packet: TcpPacket<Vec<u8>>,
+}
+impl_smol_message!(Rst);
