@@ -15,13 +15,22 @@ use tcpst2::{
     ServerUserSessionType,
 };
 
+/// tcpst2 server
+#[derive(argh::FromArgs, Debug)]
+struct CmdlineArgs {
+    #[argh(positional)]
+    local_addr: Ipv4Addr,
+
+    #[argh(positional)]
+    remote_addr: Ipv4Addr,
+}
+
 fn main() -> Result<()> {
     pretty_env_logger::formatted_builder()
         .filter_level(log::LevelFilter::Trace)
         .init();
 
-    let remote_addr = Ipv4Addr::new(192, 168, 22, 100);
-    let local_addr = Ipv4Addr::new(192, 168, 22, 1);
+    let args = argh::from_env::<CmdlineArgs>();
 
     // Create the underlying communication channel and the session typed CrossbeamChannel
     let (cbtx1, cbrx1) = unbounded();
@@ -99,11 +108,11 @@ fn main() -> Result<()> {
             // Thread B shows the communication from the point of the TCP system.
             // TCP system communicates with both the remote client and the local userspace.
 
-            let smol_lower = SmolLower::new().unwrap();
+            let smol_lower = SmolLower::new(args.local_addr.into()).unwrap();
             let checksum_caps = smol_lower.checksum_caps();
             let mut net_channel = SmolChannel::<RoleServerSystem, RoleClientSystem>::new(
                 smol_lower,
-                smoltcp::wire::Ipv4Address::new(192, 168, 22, 100),
+                args.remote_addr.into(),
             );
             let st = ServerSystemSessionType::new();
             let tcp = TcpClosed::new();
@@ -111,7 +120,7 @@ fn main() -> Result<()> {
             // await Open call from user
             let (_open, st) = system_user_channel.offer_one(st);
             let tcp = tcp.open(LocalAddr {
-                addr: local_addr,
+                addr: args.local_addr,
                 port: 555,
                 checksum_caps,
             } /* TODO take this from user */);
@@ -120,7 +129,7 @@ fn main() -> Result<()> {
 
             let (syn, st) = net_channel.offer_one_filtered(st, &tcp);
 
-            let (tcp, synack) = tcp.recv_syn(remote_addr, &syn);
+            let (tcp, synack) = tcp.recv_syn(args.remote_addr, &syn);
             let st = net_channel.select_one(st, synack);
 
             let (ack, st) = net_channel.offer_one_filtered(st, &tcp);

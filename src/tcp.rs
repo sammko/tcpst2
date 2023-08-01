@@ -3,7 +3,7 @@ use smoltcp::{
     phy::ChecksumCapabilities,
     wire::{IpAddress, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
-use std::{any::TypeId, marker::PhantomData, net::Ipv4Addr, ops::AddAssign};
+use std::{any::TypeId, marker::PhantomData, net::Ipv4Addr};
 
 use crate::smol_channel::{Ack, FinAck, Rst, SmolMessage, Syn, SynAck};
 
@@ -95,12 +95,12 @@ impl TcpListen {
         let mut tcb = Tcb {
             irs: syn.seq_number,
             rcv_nxt: syn.seq_number + syn.segment_len(),
-            rcv_wnd: syn.window_len,
+            rcv_wnd: 1000,
 
             iss,
             snd_una: iss,
             snd_nxt: iss,
-            snd_wnd: 0,
+            snd_wnd: syn.window_len,
         };
 
         let resp = TcpRepr {
@@ -116,7 +116,7 @@ impl TcpListen {
             sack_ranges: [None, None, None],
             payload: &[],
         };
-        tcb.snd_nxt.add_assign(resp.segment_len());
+        tcb.snd_nxt += resp.segment_len();
 
         let mut resp_data = vec![0; resp.buffer_len()];
         resp.emit(
@@ -209,7 +209,7 @@ where
             payload,
         };
 
-        self.tcb.snd_nxt.add_assign(repr.segment_len());
+        self.tcb.snd_nxt += repr.segment_len();
 
         let mut buf = vec![0; repr.buffer_len()];
         let mut packet = TcpPacket::new_unchecked(&mut buf);
@@ -273,6 +273,16 @@ where
             return Reaction::NotAcceptable(reply);
         }
 
+        if seg.seq_number > self.tcb.rcv_nxt {
+            todo!("gap before received segment")
+        }
+
+        let payload = seg
+            .payload
+            .get(self.tcb.rcv_nxt - seg.seq_number..)
+            .unwrap_or(&[]);
+        // let's not worry about payloads that are too long
+
         if seg.control == TcpControl::Rst {
             if seg.seq_number == self.tcb.rcv_nxt {
                 // clean reset
@@ -319,15 +329,15 @@ where
 
                 // ignore URG
 
-                self.tcb.rcv_nxt += seg.segment_len();
+                self.tcb.rcv_nxt = seg.seq_number + seg.segment_len();
                 Reaction::Acceptable(
                     if seg.segment_len() > 0 {
                         Some(self.build_ack(&[]))
                     } else {
                         None
                     },
-                    if seg.payload.len() > 0 {
-                        Some(seg.payload)
+                    if payload.len() > 0 {
+                        Some(payload)
                     } else {
                         None
                     },

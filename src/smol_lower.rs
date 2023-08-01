@@ -4,9 +4,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{wait as phy_wait, ChecksumCapabilities, Device, Medium, TunTapInterface};
 use smoltcp::socket::raw;
 use smoltcp::time::Instant;
-use smoltcp::wire::{
-    IpAddress, IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv4Packet, Ipv4Repr, TcpPacket,
-};
+use smoltcp::wire::{IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv4Packet, Ipv4Repr, TcpPacket};
 use std::os::fd::AsRawFd;
 
 pub struct SmolLower<'a> {
@@ -19,16 +17,14 @@ pub struct SmolLower<'a> {
 }
 
 impl SmolLower<'_> {
-    pub fn new() -> Result<Self> {
+    pub fn new(local_addr: Ipv4Address) -> Result<Self> {
         let mut device = TunTapInterface::new("tun-st", Medium::Ip)?;
         let config = Config::new(smoltcp::wire::HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut device, Instant::now());
 
-        let our_ipv4 = Ipv4Address::new(192, 168, 22, 1);
-
         iface.update_ip_addrs(|ip_addrs| {
             ip_addrs
-                .push(IpCidr::new(IpAddress::Ipv4(our_ipv4), 24))
+                .push(IpCidr::new(local_addr.into(), 24))
                 .expect("too many addresses");
         });
 
@@ -49,7 +45,7 @@ impl SmolLower<'_> {
         info!("listening on {}", iface.ipv4_addr().unwrap());
 
         Ok(Self {
-            addr: our_ipv4,
+            addr: local_addr,
             listen_port: 555,
             interface: iface,
             device,
