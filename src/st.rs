@@ -156,3 +156,34 @@ impl Action for End {
         End {}
     }
 }
+
+pub struct NestRole;
+
+impl Role for NestRole {}
+
+pub enum Nested<M1, M2> {
+    Left(M1),
+    Right(M2),
+}
+impl<M1, M2> Message for Nested<M1, M2>
+where
+    M1: Message,
+    M2: Message,
+{
+}
+
+pub fn nested_offer_two<M1, M2, A1, A2>(
+    _o: OfferTwo<NestRole, M1, M2, A1, A2>,
+    nested: Nested<M1, M2>,
+) -> Branch<(M1, A1), (M2, A2)>
+where
+    M1: Message,
+    M2: Message,
+    A1: Action,
+    A2: Action,
+{
+    match nested {
+        Nested::Left(m1) => Branch::Left((m1, A1::new())),
+        Nested::Right(m2) => Branch::Right((m2, A2::new())),
+    }
+}

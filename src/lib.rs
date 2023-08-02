@@ -10,8 +10,8 @@ use std::marker::PhantomData;
 
 use crate::cb::{Close, Connected, Data, Open, TcbCreated};
 use crate::smol_channel::{Ack, FinAck, Syn, SynAck};
-use crate::st::{Action, End, OfferOne, OfferTwo, Role, SelectOne, SelectTwo};
-use crate::st_macros::{Rec, Role, St};
+use crate::st::{Action, End, NestRole, Nested, OfferOne, OfferTwo, Role, SelectOne, SelectTwo};
+use crate::st_macros::{Nest, Rec, Role, St};
 
 Role!(pub RoleServerSystem);
 Role!(pub RoleServerUser);
@@ -48,7 +48,7 @@ Rec!(pub ServerSystemCloseWait, [
 
 Rec!(pub ServerSystemCommLoop, [
     (RoleClientSystem & {
-        Ack.
+        Ack. // acceptable
             (RoleClientSystem + Ack /* empty */).
             (RoleServerUser + Data).
             (RoleServerUser & {
@@ -63,7 +63,8 @@ Rec!(pub ServerSystemCommLoop, [
         FinAck.
             (RoleClientSystem + Ack /* we ACK the FIN */).
             (RoleServerUser + Close).
-            ServerSystemCloseWait
+            ServerSystemCloseWait,
+        Ack.End, // TODO not-acceptable
     })
 ]);
 

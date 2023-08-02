@@ -8,7 +8,7 @@ use log::info;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
-use tcpst2::st::{Action, Branch, Choice};
+use tcpst2::st::{nested_offer_two, Action, Branch, Choice, Nested};
 use tcpst2::tcp::{LocalAddr, TcpClosed};
 use tcpst2::{
     RoleClientSystem, RoleServerSystem, RoleServerUser, ServerSystemSessionType,
@@ -146,9 +146,10 @@ fn main() -> Result<()> {
                     st,
                     |packet| {
                         if packet.fin() {
-                            Choice::Right
+                            Branch::Right(Nested::Left(packet.into()))
                         } else {
-                            Choice::Left
+                            // TODO detect not acceptable and return Branch::Right(Nested::Right)
+                            Branch::Left(packet.into())
                         }
                     },
                     &tcp,
@@ -195,9 +196,9 @@ fn main() -> Result<()> {
                                         st,
                                         |packet| {
                                             if packet.fin() {
-                                                Choice::Right
+                                                Branch::Right(packet.into())
                                             } else {
-                                                Choice::Left
+                                                Branch::Left(packet.into())
                                             }
                                         },
                                         &tcp,
@@ -224,37 +225,44 @@ fn main() -> Result<()> {
                             }
                         }
                     }
-                    Branch::Right((fin, st)) => {
-                        let (mut tcp, ack) = tcp.recv_fin(&fin);
-                        let st = net_channel.select_one(st, ack);
-                        let mut recursive = system_user_channel.select_one(st, Close {});
-                        loop {
-                            let st = recursive.inner();
-                            match system_user_channel.offer_two(st, |payload| {
-                                // TODO improve this signalling
-                                if payload.len() > 0 {
-                                    Choice::Left
-                                } else {
-                                    Choice::Right
-                                }
-                            }) {
-                                Branch::Left((data, st)) => {
-                                    let tx = tcp.send(&data.data);
-                                    let st = net_channel.select_one(st, tx);
-                                    let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
-                                    tcp.recv_ack(&ack);
-                                    recursive = st;
-                                    continue;
-                                }
-                                Branch::Right((_close, st)) => {
-                                    let (tcp, fin) = tcp.close();
-                                    let st = net_channel.select_one(st, fin);
-                                    let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
-                                    tcp.recv_ack(&ack);
-                                    net_channel.close(st);
-                                    break 'top;
+                    Branch::Right((nested, st)) => {
+                        match nested_offer_two(st, nested) {
+                            Branch::Left((fin, st)) => {
+                                let (mut tcp, ack) = tcp.recv_fin(&fin);
+                                let st = net_channel.select_one(st, ack);
+                                let mut recursive = system_user_channel.select_one(st, Close {});
+                                loop {
+                                    let st = recursive.inner();
+                                    match system_user_channel.offer_two(st, |payload| {
+                                        // TODO improve this signalling
+                                        if payload.len() > 0 {
+                                            Choice::Left
+                                        } else {
+                                            Choice::Right
+                                        }
+                                    }) {
+                                        Branch::Left((data, st)) => {
+                                            let tx = tcp.send(&data.data);
+                                            let st = net_channel.select_one(st, tx);
+                                            let (ack, st) =
+                                                net_channel.offer_one_filtered(st, &tcp);
+                                            tcp.recv_ack(&ack);
+                                            recursive = st;
+                                            continue;
+                                        }
+                                        Branch::Right((_close, st)) => {
+                                            let (tcp, fin) = tcp.close();
+                                            let st = net_channel.select_one(st, fin);
+                                            let (ack, st) =
+                                                net_channel.offer_one_filtered(st, &tcp);
+                                            tcp.recv_ack(&ack);
+                                            net_channel.close(st);
+                                            break 'top;
+                                        }
+                                    }
                                 }
                             }
+                            Branch::Right(_) => todo!(),
                         }
                     }
                 }

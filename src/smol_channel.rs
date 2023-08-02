@@ -4,7 +4,7 @@ use smoltcp::wire::{Ipv4Address, TcpPacket};
 
 use crate::{
     smol_lower::SmolLower,
-    st::{Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo},
+    st::{Action, Branch, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo},
     tcp::ChannelFilter,
 };
 
@@ -61,11 +61,11 @@ where
     where
         R1: Role,
         R2: Role,
-        M1: SmolMessage,
-        M2: SmolMessage,
+        M1: Message,
+        M2: Message,
         A1: Action,
         A2: Action,
-        P: FnOnce(&TcpPacket<Vec<u8>>) -> Choice,
+        P: FnOnce(TcpPacket<Vec<u8>>) -> Branch<M1, M2>,
         F: ChannelFilter<TcpPacket<Vec<u8>>>,
     {
         let (addr, buf) = loop {
@@ -75,9 +75,9 @@ where
             }
         };
         assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
-        match picker(&buf) {
-            Choice::Left => Branch::Left((M1::from_packet(buf), A1::new())),
-            Choice::Right => Branch::Right((M2::from_packet(buf), A2::new())),
+        match picker(buf) {
+            Branch::Left(m) => Branch::Left((m, A1::new())),
+            Branch::Right(m) => Branch::Right((m, A2::new())),
         }
     }
 
@@ -150,6 +150,11 @@ macro_rules! impl_smol_message {
 
             fn from_packet(packet: TcpPacket<Vec<u8>>) -> Self {
                 $name { packet }
+            }
+        }
+        impl From<TcpPacket<Vec<u8>>> for $name {
+            fn from(packet: TcpPacket<Vec<u8>>) -> Self {
+                Self::from_packet(packet)
             }
         }
     };

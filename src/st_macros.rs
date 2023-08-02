@@ -22,6 +22,12 @@ macro_rules! Role {
 }
 pub(crate) use Role;
 
+macro_rules! Nest {
+    [ $m1:ident, $m2:ident ] => { Nested<$m1, $m2> };
+    [ $m1:ident, $($tail:ident),* ] => { Nested<$m1, Nest![$($tail),*]> };
+}
+pub(crate) use Nest;
+
 macro_rules! St {
     [ end ] => { End };
     [ $cont:ident ] => { $cont };
@@ -42,6 +48,12 @@ macro_rules! St {
         $msg2:ident $(.$tail2:tt)*
     }) ] => {
         OfferTwo<$peer, $msg1, $msg2, St![$($tail1).*], St![$($tail2).*]>
+    };
+    [ ($peer:ident & {
+        $msg1:ident $(.$tail1:tt)*
+        $(,$msgs:ident $(.$tails:tt)*)*$(,)?
+    }) ] => {
+        OfferTwo<$peer, $msg1, Nest![$($msgs),*], St![$($tail1).*], St![ (NestRole & {$($msgs $(.$tails)*),*}) ]>
     };
 }
 pub(crate) use St;
