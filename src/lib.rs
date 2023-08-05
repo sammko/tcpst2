@@ -48,18 +48,19 @@ Rec!(pub ServerSystemCloseWait, [
 
 Rec!(pub ServerSystemCommLoop, [
     (RoleClientSystem & {
-        Ack. // acceptable
+        Ack. // acceptable with payload
             (RoleClientSystem + Ack /* empty */).
             (RoleServerUser + Data).
             (RoleServerUser & {
                 Data.
-                    (RoleClientSystem + Ack).
-                    (RoleClientSystem & Ack /* empty ack */). // TODO we should make this another branch of the top-level offer
+                    (RoleClientSystem + Ack /* with data */).
                     ServerSystemCommLoop,
                 Close.
                     (RoleClientSystem + FinAck).
                     ServerSystemFinWait1
             }),
+        Ack. // acceptable empty
+            ServerSystemCommLoop,
         FinAck.
             (RoleClientSystem + Ack /* we ACK the FIN */).
             (RoleServerUser + Close).

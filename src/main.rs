@@ -5,6 +5,7 @@ use anyhow::Result;
 use crossbeam_channel::unbounded;
 use log::{info, warn};
 
+use smoltcp::wire::TcpPacket;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
@@ -134,28 +135,28 @@ fn main() -> Result<()> {
                     st,
                     move |packet| {
                         if packet.fin() {
-                            Branch::Right(Nested::Left(packet.into()))
+                            Branch::Right(Nested::Right(Nested::Left(packet.into())))
                         } else {
                             match tcp_for_picker.acceptable(&packet) {
-                                true => Branch::Left(packet.into()),
-                                false => Branch::Right(Nested::Right(packet.into())),
+                                true => match TcpPacket::new_unchecked(&packet).payload().len() {
+                                    0 => Branch::Right(Nested::Left(packet.into())),
+                                    _ => Branch::Left(packet.into()),
+                                },
+                                false => Branch::Right(Nested::Right(Nested::Right(packet.into()))),
                             }
                         }
                     },
                     &tcp,
                 ) {
-                    Branch::Left((rx, st)) => {
-                        let (resp, data): (_, &[u8]) = match tcp.recv(&rx) {
-                            Reaction::Acceptable(resp, Some(data)) => (resp, data),
-                            Reaction::Acceptable(resp, None) => (resp, &[]),
+                    Branch::Left((acceptable_with_data, st)) => {
+                        let (resp, data): (_, &[u8]) = match tcp.recv(&acceptable_with_data) {
+                            Reaction::Acceptable(Some(resp), Some(data)) => (resp, data),
+                            Reaction::Acceptable(Some(resp), None) => (resp, &[]),
+                            Reaction::Acceptable(None, _) => unreachable!(),
                             Reaction::NotAcceptable(_) => unreachable!(),
                             Reaction::Reset(_) => unreachable!(),
                         };
-                        let st = net_channel.select_one(
-                            st,
-                            tcp.remote_addr(),
-                            resp.expect("not represented by ST"),
-                        );
+                        let st = net_channel.select_one(st, tcp.remote_addr(), resp);
 
                         info!("Got {:?} bytes", data.len());
 
@@ -177,16 +178,8 @@ fn main() -> Result<()> {
                             Branch::Left((data, st)) => {
                                 let tx = tcp.send(&data.data);
                                 let st = net_channel.select_one(st, tcp.remote_addr(), tx);
-                                let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
-                                match tcp.recv(&ack) {
-                                    Reaction::Acceptable(None, None) => {
-                                        recursive = st;
-                                        continue;
-                                    }
-                                    Reaction::Acceptable(_, _) => todo!(),
-                                    Reaction::NotAcceptable(_) => todo!(),
-                                    Reaction::Reset(_) => todo!(),
-                                }
+                                recursive = st;
+                                continue 'top;
                             }
                             Branch::Right((_close, st)) => {
                                 let (tcp, fin) = tcp.close();
@@ -234,53 +227,78 @@ fn main() -> Result<()> {
                     }
                     Branch::Right((nested, st)) => {
                         match nested_offer_two(st, nested) {
-                            Branch::Left((fin, st)) => {
-                                let (mut tcp, ack) = tcp.recv_fin(&fin);
-                                let st = net_channel.select_one(st, tcp.remote_addr(), ack);
-                                let mut recursive = system_user_channel.select_one(st, Close {});
-                                loop {
-                                    let st = recursive.inner();
-                                    match system_user_channel.offer_two(st, |payload| {
-                                        // TODO improve this signalling
-                                        if payload.len() > 0 {
-                                            Choice::Left
-                                        } else {
-                                            Choice::Right
-                                        }
-                                    }) {
-                                        Branch::Left((data, st)) => {
-                                            let tx = tcp.send(&data.data);
-                                            let st =
-                                                net_channel.select_one(st, tcp.remote_addr(), tx);
-                                            let (ack, st) =
-                                                net_channel.offer_one_filtered(st, &tcp);
-                                            tcp.recv_ack(&ack);
-                                            recursive = st;
-                                            continue;
-                                        }
-                                        Branch::Right((_close, st)) => {
-                                            let (tcp, fin) = tcp.close();
-                                            let st =
-                                                net_channel.select_one(st, tcp.remote_addr(), fin);
-                                            let (ack, st) =
-                                                net_channel.offer_one_filtered(st, &tcp);
-                                            tcp.recv_ack(&ack);
-                                            net_channel.close(st);
-                                            break 'top;
-                                        }
+                            Branch::Left((acceptable_empty, st)) => {
+                                match tcp.recv(&acceptable_empty) {
+                                    Reaction::Acceptable(None, None) => {
+                                        recursive = st;
+                                        continue 'top;
                                     }
+                                    Reaction::Acceptable(_, _) => unreachable!(),
+                                    Reaction::NotAcceptable(_) => unreachable!(),
+                                    Reaction::Reset(_) => unreachable!(),
                                 }
                             }
-                            Branch::Right((not_acceptable, st)) => {
-                                warn!("Not acceptable");
-                                let challenge = match tcp.recv(&not_acceptable) {
-                                    Reaction::Acceptable(_, _) => unreachable!(),
-                                    Reaction::NotAcceptable(Some(challenge)) => challenge,
-                                    Reaction::NotAcceptable(None) => todo!(),
-                                    Reaction::Reset(_) => todo!(),
-                                };
-                                recursive =
-                                    net_channel.select_one(st, tcp.remote_addr(), challenge);
+                            Branch::Right((nested, st)) => {
+                                match nested_offer_two(st, nested) {
+                                    Branch::Left((fin, st)) => {
+                                        let (mut tcp, ack) = tcp.recv_fin(&fin);
+                                        let st = net_channel.select_one(st, tcp.remote_addr(), ack);
+                                        let mut recursive =
+                                            system_user_channel.select_one(st, Close {});
+                                        loop {
+                                            let st = recursive.inner();
+                                            match system_user_channel.offer_two(st, |payload| {
+                                                // TODO improve this signalling
+                                                if payload.len() > 0 {
+                                                    Choice::Left
+                                                } else {
+                                                    Choice::Right
+                                                }
+                                            }) {
+                                                Branch::Left((data, st)) => {
+                                                    let tx = tcp.send(&data.data);
+                                                    let st = net_channel.select_one(
+                                                        st,
+                                                        tcp.remote_addr(),
+                                                        tx,
+                                                    );
+                                                    let (ack, st) =
+                                                        net_channel.offer_one_filtered(st, &tcp);
+                                                    tcp.recv_ack(&ack);
+                                                    recursive = st;
+                                                    continue;
+                                                }
+                                                Branch::Right((_close, st)) => {
+                                                    let (tcp, fin) = tcp.close();
+                                                    let st = net_channel.select_one(
+                                                        st,
+                                                        tcp.remote_addr(),
+                                                        fin,
+                                                    );
+                                                    let (ack, st) =
+                                                        net_channel.offer_one_filtered(st, &tcp);
+                                                    tcp.recv_ack(&ack);
+                                                    net_channel.close(st);
+                                                    break 'top;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Branch::Right((not_acceptable, st)) => {
+                                        warn!("Not acceptable");
+                                        let challenge = match tcp.recv(&not_acceptable) {
+                                            Reaction::Acceptable(_, _) => unreachable!(),
+                                            Reaction::NotAcceptable(Some(challenge)) => challenge,
+                                            Reaction::NotAcceptable(None) => todo!(),
+                                            Reaction::Reset(_) => todo!(),
+                                        };
+                                        recursive = net_channel.select_one(
+                                            st,
+                                            tcp.remote_addr(),
+                                            challenge,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
