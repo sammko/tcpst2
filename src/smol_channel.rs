@@ -19,7 +19,6 @@ where
     R2: Role,
 {
     lower: SmolLower<'a>,
-    remote_addr: Ipv4Address,
     phantom: PhantomData<(R1, R2)>,
 }
 
@@ -28,15 +27,18 @@ where
     R1: Role,
     R2: Role,
 {
-    pub fn new(lower: SmolLower<'a>, remote_addr: Ipv4Address) -> Self {
+    pub fn new(lower: SmolLower<'a>) -> Self {
         Self {
             lower,
-            remote_addr,
             phantom: PhantomData,
         }
     }
 
-    pub fn offer_one_filtered<M, A, F>(&mut self, _o: OfferOne<R2, M, A>, filter: &F) -> (M, A)
+    pub fn offer_one_with_addr<M, A, F>(
+        &mut self,
+        _o: OfferOne<R2, M, A>,
+        filter: &F,
+    ) -> (Ipv4Address, M, A)
     where
         M: SmolMessage,
         A: Action,
@@ -44,12 +46,21 @@ where
     {
         let (addr, buf) = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
-            if filter.filter(&buf) {
+            if filter.filter(addr, &buf) {
                 break (addr, buf);
             }
         };
-        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
-        (M::from_packet(buf), A::new())
+        (addr, M::from_packet(buf), A::new())
+    }
+
+    pub fn offer_one_filtered<M, A, F>(&mut self, o: OfferOne<R2, M, A>, filter: &F) -> (M, A)
+    where
+        M: SmolMessage,
+        A: Action,
+        F: ChannelFilter<TcpPacket<Vec<u8>>>,
+    {
+        let (_, m, a) = self.offer_one_with_addr(o, filter);
+        (m, a)
     }
 
     pub fn offer_two_filtered<M1, M2, A1, A2, P, F>(
@@ -68,20 +79,19 @@ where
         P: FnOnce(TcpPacket<Vec<u8>>) -> Branch<M1, M2>,
         F: ChannelFilter<TcpPacket<Vec<u8>>>,
     {
-        let (addr, buf) = loop {
+        let buf = loop {
             let (addr, buf) = self.lower.recv().expect("recv failed");
-            if filter.filter(&buf) {
-                break (addr, buf);
+            if filter.filter(addr, &buf) {
+                break buf;
             }
         };
-        assert_eq!(addr, self.remote_addr); // TODO handle multiple peers
         match picker(buf) {
             Branch::Left(m) => Branch::Left((m, A1::new())),
             Branch::Right(m) => Branch::Right((m, A2::new())),
         }
     }
 
-    pub fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, message: M) -> A
+    pub fn select_one<M, A>(&mut self, _o: SelectOne<R2, M, A>, to: Ipv4Address, message: M) -> A
     where
         M: SmolMessage,
         A: Action,
@@ -89,15 +99,14 @@ where
         R2: Role,
     {
         let buf = message.packet().as_ref();
-        self.lower
-            .send(self.remote_addr, &buf)
-            .expect("send failed");
+        self.lower.send(to, &buf).expect("send failed");
         A::new()
     }
 
     pub fn select_left<M1, M2, A1, A2>(
         &mut self,
         _o: SelectTwo<R2, M1, M2, A1, A2>,
+        to: Ipv4Address,
         message: M1,
     ) -> A1
     where
@@ -109,15 +118,14 @@ where
         A2: Action,
     {
         let buf = message.packet().as_ref();
-        self.lower
-            .send(self.remote_addr, &buf)
-            .expect("send failed");
+        self.lower.send(to, &buf).expect("send failed");
         A1::new()
     }
 
     pub fn select_right<M1, M2, A1, A2>(
         &mut self,
         _o: SelectTwo<R2, M1, M2, A1, A2>,
+        to: Ipv4Address,
         message: M2,
     ) -> A2
     where
@@ -129,9 +137,7 @@ where
         A2: Action,
     {
         let buf = message.packet().as_ref();
-        self.lower
-            .send(self.remote_addr, &buf)
-            .expect("send failed");
+        self.lower.send(to, &buf).expect("send failed");
         A2::new()
     }
 

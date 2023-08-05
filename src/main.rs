@@ -20,9 +20,6 @@ use tcpst2::{
 struct CmdlineArgs {
     #[argh(positional)]
     local_addr: Ipv4Addr,
-
-    #[argh(positional)]
-    remote_addr: Ipv4Addr,
 }
 
 fn main() -> Result<()> {
@@ -102,27 +99,25 @@ fn main() -> Result<()> {
 
             let smol_lower = SmolLower::new(args.local_addr.into()).unwrap();
             let checksum_caps = smol_lower.checksum_caps();
-            let mut net_channel = SmolChannel::<RoleServerSystem, RoleClientSystem>::new(
-                smol_lower,
-                args.remote_addr.into(),
-            );
+            let mut net_channel =
+                SmolChannel::<RoleServerSystem, RoleClientSystem>::new(smol_lower);
             let st = ServerSystemSessionType::new();
             let tcp = TcpClosed::new();
 
             // await Open call from user
             let (_open, st) = system_user_channel.offer_one(st);
             let tcp = tcp.open(LocalAddr {
-                addr: args.local_addr,
+                addr: args.local_addr.into(),
                 port: 555,
                 checksum_caps,
             } /* TODO take this from user */);
 
             let st = system_user_channel.select_one(st, TcbCreated {});
 
-            let (syn, st) = net_channel.offer_one_filtered(st, &tcp);
+            let (addr, syn, st) = net_channel.offer_one_with_addr(st, &tcp);
 
-            let (tcp, synack) = tcp.recv_syn(args.remote_addr, &syn);
-            let st = net_channel.select_one(st, synack);
+            let (tcp, synack) = tcp.recv_syn(addr, &syn);
+            let st = net_channel.select_one(st, addr, synack);
 
             let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
             let mut tcp = tcp.recv_ack(&ack);
@@ -156,7 +151,11 @@ fn main() -> Result<()> {
                             Reaction::NotAcceptable(_) => unreachable!(),
                             Reaction::Reset(_) => unreachable!(),
                         };
-                        let st = net_channel.select_one(st, resp.expect("not represented by ST"));
+                        let st = net_channel.select_one(
+                            st,
+                            tcp.remote_addr(),
+                            resp.expect("not represented by ST"),
+                        );
 
                         info!("Got {:?} bytes", data.len());
 
@@ -177,7 +176,7 @@ fn main() -> Result<()> {
                         }) {
                             Branch::Left((data, st)) => {
                                 let tx = tcp.send(&data.data);
-                                let st = net_channel.select_one(st, tx);
+                                let st = net_channel.select_one(st, tcp.remote_addr(), tx);
                                 let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
                                 match tcp.recv(&ack) {
                                     Reaction::Acceptable(None, None) => {
@@ -191,7 +190,7 @@ fn main() -> Result<()> {
                             }
                             Branch::Right((_close, st)) => {
                                 let (tcp, fin) = tcp.close();
-                                let st = net_channel.select_one(st, fin);
+                                let st = net_channel.select_one(st, tcp.remote_addr(), fin);
 
                                 let (rx, mut recursive) = net_channel.offer_one_filtered(st, &tcp);
                                 let mut tcp = tcp.recv(&rx);
@@ -214,12 +213,14 @@ fn main() -> Result<()> {
                                             // will just throw it away, since our user has
                                             // closed.
                                             let ack = tcp.recv_ack(&ack);
-                                            recursive = net_channel.select_one(st, ack);
+                                            recursive =
+                                                net_channel.select_one(st, tcp.remote_addr(), ack);
                                             continue;
                                         }
                                         Branch::Right((fin, st)) => {
+                                            let remote_addr = tcp.remote_addr();
                                             let ack = tcp.recv_fin(&fin);
-                                            let st = net_channel.select_one(st, ack);
+                                            let st = net_channel.select_one(st, remote_addr, ack);
                                             net_channel.close(st);
                                             // I think the `End` concept doesn't work since we want
                                             // to be able to close both channels and only have one
@@ -235,7 +236,7 @@ fn main() -> Result<()> {
                         match nested_offer_two(st, nested) {
                             Branch::Left((fin, st)) => {
                                 let (mut tcp, ack) = tcp.recv_fin(&fin);
-                                let st = net_channel.select_one(st, ack);
+                                let st = net_channel.select_one(st, tcp.remote_addr(), ack);
                                 let mut recursive = system_user_channel.select_one(st, Close {});
                                 loop {
                                     let st = recursive.inner();
@@ -249,7 +250,8 @@ fn main() -> Result<()> {
                                     }) {
                                         Branch::Left((data, st)) => {
                                             let tx = tcp.send(&data.data);
-                                            let st = net_channel.select_one(st, tx);
+                                            let st =
+                                                net_channel.select_one(st, tcp.remote_addr(), tx);
                                             let (ack, st) =
                                                 net_channel.offer_one_filtered(st, &tcp);
                                             tcp.recv_ack(&ack);
@@ -258,7 +260,8 @@ fn main() -> Result<()> {
                                         }
                                         Branch::Right((_close, st)) => {
                                             let (tcp, fin) = tcp.close();
-                                            let st = net_channel.select_one(st, fin);
+                                            let st =
+                                                net_channel.select_one(st, tcp.remote_addr(), fin);
                                             let (ack, st) =
                                                 net_channel.offer_one_filtered(st, &tcp);
                                             tcp.recv_ack(&ack);
@@ -276,7 +279,8 @@ fn main() -> Result<()> {
                                     Reaction::NotAcceptable(None) => todo!(),
                                     Reaction::Reset(_) => todo!(),
                                 };
-                                recursive = net_channel.select_one(st, challenge);
+                                recursive =
+                                    net_channel.select_one(st, tcp.remote_addr(), challenge);
                             }
                         }
                     }

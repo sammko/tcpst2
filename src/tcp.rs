@@ -1,27 +1,27 @@
 use log::{info, warn};
 use smoltcp::{
     phy::ChecksumCapabilities,
-    wire::{IpAddress, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
+    wire::{IpAddress, Ipv4Address, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
-use std::{any::TypeId, marker::PhantomData, net::Ipv4Addr};
+use std::{any::TypeId, marker::PhantomData};
 
 use crate::smol_channel::{Ack, FinAck, Rst, SmolMessage, Syn, SynAck};
 
 #[derive(Clone, Debug)]
 pub struct LocalAddr {
-    pub addr: Ipv4Addr,
+    pub addr: Ipv4Address,
     pub checksum_caps: ChecksumCapabilities,
     pub port: u16,
 }
 
 #[derive(Clone, Debug)]
 pub struct RemoteAddr {
-    addr: Ipv4Addr,
+    addr: Ipv4Address,
     port: u16,
 }
 
 pub trait ChannelFilter<T> {
-    fn filter(&self, packet: &T) -> bool;
+    fn filter(&self, from_addr: Ipv4Address, packet: &T) -> bool;
 }
 
 mod tcp_state {
@@ -94,7 +94,7 @@ impl TcpClosed {
 impl TcpListen {
     // TODO look at unifying this with Tcp<T>.
 
-    pub fn recv_syn(self, remote: Ipv4Addr, syn: &Syn) -> (Tcp<SynRcvd>, SynAck) {
+    pub fn recv_syn(self, remote: Ipv4Address, syn: &Syn) -> (Tcp<SynRcvd>, SynAck) {
         let syn = TcpRepr::parse(
             &TcpPacket::new_unchecked(syn.packet().as_ref()),
             &IpAddress::from(remote),
@@ -165,7 +165,7 @@ impl<T> ChannelFilter<TcpPacket<T>> for TcpListen
 where
     T: AsRef<[u8]>,
 {
-    fn filter(&self, packet: &TcpPacket<T>) -> bool {
+    fn filter(&self, _remote_addr: Ipv4Address, packet: &TcpPacket<T>) -> bool {
         // This is a bit janky but it works for now
         if packet.syn() == true
             && packet.ack() == false
@@ -175,7 +175,7 @@ where
         {
             true
         } else {
-            warn!("Dropping non-SYN");
+            warn!("ignoring non-SYN in Listen state");
             false
         }
     }
@@ -186,11 +186,15 @@ where
     T: TcpState + Clone,
     U: AsRef<[u8]>,
 {
-    fn filter(&self, packet: &TcpPacket<U>) -> bool {
+    fn filter(&self, remote_addr: Ipv4Address, packet: &TcpPacket<U>) -> bool {
+        if remote_addr != self.remote.addr {
+            info!("ignoring packet to wrong address");
+            return false;
+        }
         if packet.dst_port() == self.local.port && packet.src_port() == self.remote.port {
             true
         } else {
-            warn!("dropping packet to wrong port");
+            info!("ignoring packet to wrong port");
             false
         }
     }
@@ -207,6 +211,10 @@ impl<T> Tcp<T>
 where
     T: TcpState + 'static + Clone,
 {
+    pub fn remote_addr(&self) -> Ipv4Address {
+        self.remote.addr
+    }
+
     fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> TcpPacket<Vec<u8>> {
         let control = if fin {
             TcpControl::Fin
