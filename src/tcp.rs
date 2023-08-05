@@ -55,7 +55,10 @@ struct Tcb {
     iss: TcpSeqNumber,
     snd_una: TcpSeqNumber,
     snd_nxt: TcpSeqNumber,
+
     snd_wnd: u16,
+    snd_wl1: TcpSeqNumber,
+    snd_wl2: TcpSeqNumber,
 
     irs: TcpSeqNumber,
     rcv_nxt: TcpSeqNumber,
@@ -105,6 +108,12 @@ impl TcpListen {
             irs: syn.seq_number,
             rcv_nxt: syn.seq_number + syn.segment_len(),
             rcv_wnd: 1000,
+
+            // strictly speaking these should be set only when we get the first ACK
+            // but let's set them to sensible values immediately
+            // so they don't have to be Option<_>.
+            snd_wl1: syn.seq_number,
+            snd_wl2: iss,
 
             iss,
             snd_una: iss,
@@ -245,6 +254,35 @@ where
         }
     }
 
+    fn build_reset(&self) -> Rst {
+        let repr = TcpRepr {
+            src_port: self.local.port,
+            dst_port: self.remote.port,
+            control: TcpControl::Rst,
+            seq_number: self.tcb.snd_nxt,
+            ack_number: None,
+            window_len: self.tcb.rcv_wnd,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None, None, None],
+            payload: &[],
+        };
+
+        let mut buf = vec![0; repr.buffer_len()];
+
+        repr.emit(
+            &mut TcpPacket::new_unchecked(&mut buf),
+            &IpAddress::from(self.local.addr),
+            &IpAddress::from(self.remote.addr),
+            &self.local.checksum_caps,
+        );
+
+        Rst {
+            packet: TcpPacket::new_unchecked(buf),
+        }
+    }
+
     /// Determine if a segment's sequence number and length are acceptable
     /// under the current receive window.
     ///
@@ -317,11 +355,11 @@ where
                     if self.tcb.snd_una < ack_number && ack_number <= self.tcb.snd_nxt {
                         // TODO RFC 5961
                         self.tcb.snd_wnd = seg.window_len;
-                        // self.tcb.snd_wl1 = seg.seq_number;
-                        // self.tcb.snd_wl2 = ack_number;
+                        self.tcb.snd_wl1 = seg.seq_number;
+                        self.tcb.snd_wl2 = ack_number;
                         return Reaction::Acceptable(None, None);
                     } else {
-                        return Reaction::NotAcceptable(None);
+                        return Reaction::Reset(Some(self.build_reset()));
                     }
                 }
 
@@ -333,7 +371,13 @@ where
 
                 // SND.UNA =< SEG.ACK =< SND.NXT
                 if self.tcb.snd_una <= ack_number && ack_number <= self.tcb.snd_nxt {
-                    warn!("TODO should update send window")
+                    if self.tcb.snd_wl1 < seg.seq_number
+                        || (self.tcb.snd_wl1 == seg.seq_number && self.tcb.snd_wl2 <= ack_number)
+                    {
+                        self.tcb.snd_wnd = seg.window_len;
+                        self.tcb.snd_wl1 = seg.seq_number;
+                        self.tcb.snd_wl2 = ack_number;
+                    }
                 }
 
                 // ignore URG
