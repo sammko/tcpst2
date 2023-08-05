@@ -54,7 +54,7 @@ Rec!(pub ServerSystemCommLoop, [
             (RoleServerUser & {
                 Data.
                     (RoleClientSystem + Ack).
-                    (RoleClientSystem & Ack /* empty ack */).
+                    (RoleClientSystem & Ack /* empty ack */). // TODO we should make this another branch of the top-level offer
                     ServerSystemCommLoop,
                 Close.
                     (RoleClientSystem + FinAck).
@@ -64,7 +64,9 @@ Rec!(pub ServerSystemCommLoop, [
             (RoleClientSystem + Ack /* we ACK the FIN */).
             (RoleServerUser + Close).
             ServerSystemCloseWait,
-        Ack.End, // TODO not-acceptable
+        Ack. // unacceptable
+            (RoleClientSystem + Ack /* challenge */).
+            ServerSystemCommLoop
     })
 ]);
 

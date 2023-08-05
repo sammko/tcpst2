@@ -3,13 +3,13 @@ use std::thread;
 
 use anyhow::Result;
 use crossbeam_channel::unbounded;
-use log::info;
+use log::{info, warn};
 
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
 use tcpst2::st::{nested_offer_two, Action, Branch, Choice, Nested};
-use tcpst2::tcp::{LocalAddr, TcpClosed};
+use tcpst2::tcp::{LocalAddr, Reaction, TcpClosed};
 use tcpst2::{
     RoleClientSystem, RoleServerSystem, RoleServerUser, ServerSystemSessionType,
     ServerUserSessionType,
@@ -85,14 +85,6 @@ fn main() -> Result<()> {
                     }
                     Branch::Right((_close, recursive)) => {
                         let st = recursive.inner();
-                        let st = user_system_channel
-                            .select_left(
-                                st,
-                                Data {
-                                    data: b"closing".to_vec(),
-                                },
-                            )
-                            .inner();
                         let st = user_system_channel.select_right(st, Close {});
                         user_system_channel.close(st);
                         break 'top;
@@ -142,20 +134,28 @@ fn main() -> Result<()> {
             'top: loop {
                 let st = recursive.inner();
 
+                let tcp_for_picker = tcp.for_picker();
                 match net_channel.offer_two_filtered(
                     st,
-                    |packet| {
+                    move |packet| {
                         if packet.fin() {
                             Branch::Right(Nested::Left(packet.into()))
                         } else {
-                            // TODO detect not acceptable and return Branch::Right(Nested::Right)
-                            Branch::Left(packet.into())
+                            match tcp_for_picker.acceptable(&packet) {
+                                true => Branch::Left(packet.into()),
+                                false => Branch::Right(Nested::Right(packet.into())),
+                            }
                         }
                     },
                     &tcp,
                 ) {
                     Branch::Left((rx, st)) => {
-                        let (resp, data) = tcp.recv(&rx);
+                        let (resp, data): (_, &[u8]) = match tcp.recv(&rx) {
+                            Reaction::Acceptable(resp, Some(data)) => (resp, data),
+                            Reaction::Acceptable(resp, None) => (resp, &[]),
+                            Reaction::NotAcceptable(_) => unreachable!(),
+                            Reaction::Reset(_) => unreachable!(),
+                        };
                         let st = net_channel.select_one(st, resp.expect("not represented by ST"));
 
                         info!("Got {:?} bytes", data.len());
@@ -179,9 +179,15 @@ fn main() -> Result<()> {
                                 let tx = tcp.send(&data.data);
                                 let st = net_channel.select_one(st, tx);
                                 let (ack, st) = net_channel.offer_one_filtered(st, &tcp);
-                                tcp.recv(&ack);
-                                recursive = st;
-                                continue;
+                                match tcp.recv(&ack) {
+                                    Reaction::Acceptable(None, None) => {
+                                        recursive = st;
+                                        continue;
+                                    }
+                                    Reaction::Acceptable(_, _) => todo!(),
+                                    Reaction::NotAcceptable(_) => todo!(),
+                                    Reaction::Reset(_) => todo!(),
+                                }
                             }
                             Branch::Right((_close, st)) => {
                                 let (tcp, fin) = tcp.close();
@@ -262,7 +268,16 @@ fn main() -> Result<()> {
                                     }
                                 }
                             }
-                            Branch::Right(_) => todo!(),
+                            Branch::Right((not_acceptable, st)) => {
+                                warn!("Not acceptable");
+                                let challenge = match tcp.recv(&not_acceptable) {
+                                    Reaction::Acceptable(_, _) => unreachable!(),
+                                    Reaction::NotAcceptable(Some(challenge)) => challenge,
+                                    Reaction::NotAcceptable(None) => todo!(),
+                                    Reaction::Reset(_) => todo!(),
+                                };
+                                recursive = net_channel.select_one(st, challenge);
+                            }
                         }
                     }
                 }

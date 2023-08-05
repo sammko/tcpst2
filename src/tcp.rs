@@ -7,11 +7,14 @@ use std::{any::TypeId, marker::PhantomData, net::Ipv4Addr};
 
 use crate::smol_channel::{Ack, FinAck, Rst, SmolMessage, Syn, SynAck};
 
+#[derive(Clone, Debug)]
 pub struct LocalAddr {
     pub addr: Ipv4Addr,
     pub checksum_caps: ChecksumCapabilities,
     pub port: u16,
 }
+
+#[derive(Clone, Debug)]
 pub struct RemoteAddr {
     addr: Ipv4Addr,
     port: u16,
@@ -21,29 +24,33 @@ pub trait ChannelFilter<T> {
     fn filter(&self, packet: &T) -> bool;
 }
 
-// type markers
-pub struct SynRcvd;
-pub struct Established;
-pub struct FinWait1;
-pub struct FinWait2;
-pub struct CloseWait;
-pub struct LastAck;
-
 mod tcp_state {
-    use super::*;
+    macro_rules! impl_tcp_state {
+        ($($t:ident),*) => {
+            $(
+                #[derive(Clone, Copy, Debug)]
+                pub struct $t;
+                impl TcpState for $t {}
+            )*
+        }
+    }
 
-    impl TcpState for SynRcvd {}
-    impl TcpState for Established {}
-    impl TcpState for FinWait1 {}
-    impl TcpState for FinWait2 {}
-    impl TcpState for CloseWait {}
-    impl TcpState for LastAck {}
+    impl_tcp_state!(
+        SynRcvd,
+        Established,
+        FinWait1,
+        FinWait2,
+        CloseWait,
+        LastAck,
+        _ForPicker
+    );
 
     pub trait TcpState {}
 }
-use tcp_state::TcpState;
+use tcp_state::*;
 
 #[allow(dead_code)]
+#[derive(Copy, Clone, Debug)]
 struct Tcb {
     iss: TcpSeqNumber,
     snd_una: TcpSeqNumber,
@@ -59,9 +66,11 @@ pub struct TcpClosed;
 pub struct TcpListen {
     local: LocalAddr,
 }
+
+#[derive(Clone, Debug)]
 pub struct Tcp<State>
 where
-    State: TcpState,
+    State: TcpState + Clone,
 {
     local: LocalAddr,
     remote: RemoteAddr,
@@ -165,7 +174,7 @@ where
 
 impl<T, U> ChannelFilter<TcpPacket<U>> for Tcp<T>
 where
-    T: TcpState,
+    T: TcpState + Clone,
     U: AsRef<[u8]>,
 {
     fn filter(&self, packet: &TcpPacket<U>) -> bool {
@@ -187,7 +196,7 @@ pub enum Reaction<'a> {
 
 impl<T> Tcp<T>
 where
-    T: TcpState + 'static,
+    T: TcpState + 'static + Clone,
 {
     fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> TcpPacket<Vec<u8>> {
         let control = if fin {
@@ -359,6 +368,30 @@ where
         )
         .unwrap()
     }
+
+    pub fn for_picker(&self) -> Tcp<_ForPicker> {
+        let clone = (*self).clone();
+        clone.transition()
+    }
+}
+
+trait Transition<T> {
+    fn transition(self) -> T;
+}
+
+impl<T, U> Transition<Tcp<T>> for Tcp<U>
+where
+    T: TcpState + Clone,
+    U: TcpState + Clone,
+{
+    fn transition(self) -> Tcp<T> {
+        Tcp {
+            local: self.local,
+            remote: self.remote,
+            tcb: self.tcb,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl Tcp<SynRcvd> {
@@ -382,14 +415,9 @@ impl Tcp<SynRcvd> {
 }
 
 impl Tcp<Established> {
-    pub fn recv<'a>(&mut self, ack: &'a Ack) -> (Option<Ack>, &'a [u8]) {
+    pub fn recv<'a>(&mut self, ack: &'a Ack) -> Reaction<'a> {
         let ack: TcpRepr<'a> = self.parse(ack);
-        match self.accept(&ack) {
-            Reaction::Acceptable(resp, Some(data)) => (resp, data),
-            Reaction::Acceptable(resp, None) => (resp, &[]),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
-        }
+        self.accept(&ack)
     }
 
     pub fn recv_fin(mut self, fin: &FinAck) -> (Tcp<CloseWait>, Ack) {
@@ -416,15 +444,7 @@ impl Tcp<Established> {
 
     pub fn close(mut self) -> (Tcp<FinWait1>, FinAck) {
         let fin = self.build_fin();
-        (
-            Tcp {
-                local: self.local,
-                remote: self.remote,
-                tcb: self.tcb,
-                _marker: PhantomData,
-            },
-            fin,
-        )
+        (self.transition(), fin)
     }
 }
 
@@ -484,15 +504,7 @@ impl Tcp<CloseWait> {
 
     pub fn close(mut self) -> (Tcp<LastAck>, FinAck) {
         let fin = self.build_fin();
-        (
-            Tcp {
-                local: self.local,
-                remote: self.remote,
-                tcb: self.tcb,
-                _marker: PhantomData,
-            },
-            fin,
-        )
+        (self.transition(), fin)
     }
 }
 
@@ -504,6 +516,26 @@ impl Tcp<LastAck> {
             Reaction::Acceptable(_, _) => todo!(),
             Reaction::NotAcceptable(_) => todo!(),
             Reaction::Reset(_) => todo!(),
+        }
+    }
+}
+
+impl Tcp<_ForPicker> {
+    pub fn acceptable<T>(mut self, packet: &TcpPacket<T>) -> bool
+    where
+        T: AsRef<[u8]>,
+    {
+        let packet = TcpRepr::parse(
+            &TcpPacket::new_unchecked(packet.as_ref()),
+            &IpAddress::from(self.remote.addr),
+            &IpAddress::from(self.local.addr),
+            &self.local.checksum_caps,
+        )
+        .unwrap();
+        match self.accept(&packet) {
+            Reaction::Acceptable(_, _) => true,
+            Reaction::NotAcceptable(_) => false,
+            Reaction::Reset(_) => false,
         }
     }
 }
