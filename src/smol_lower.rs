@@ -1,6 +1,5 @@
 use anyhow::Result;
-use log::{debug, info, warn};
-use rand::Rng;
+use log::{debug, info};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{wait as phy_wait, ChecksumCapabilities, Device, Medium, TunTapInterface};
 use smoltcp::socket::raw;
