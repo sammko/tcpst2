@@ -3,7 +3,7 @@ use smoltcp::{
     phy::ChecksumCapabilities,
     wire::{IpAddress, Ipv4Address, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
-use std::{any::TypeId, marker::PhantomData};
+use std::{any::TypeId, collections::VecDeque, marker::PhantomData};
 
 use crate::smol_channel::{Ack, FinAck, Rst, SmolMessage, Syn, SynAck};
 
@@ -78,6 +78,7 @@ where
     local: LocalAddr,
     remote: RemoteAddr,
     tcb: Tcb,
+    retransmission: VecDeque<TcpPacket<Vec<u8>>>,
     _marker: PhantomData<State>,
 }
 
@@ -152,6 +153,7 @@ impl TcpListen {
                     port: syn.src_port,
                 },
                 tcb,
+                retransmission: Default::default(),
                 _marker: PhantomData,
             },
             SynAck {
@@ -329,7 +331,8 @@ where
         }
 
         if seg.seq_number > self.tcb.rcv_nxt {
-            todo!("gap before received segment")
+            warn!("gap before received segment, ignoring");
+            return Reaction::Acceptable(None, None);
         }
 
         let payload = seg
@@ -373,6 +376,14 @@ where
 
                 if self.tcb.snd_una < ack_number && ack_number <= self.tcb.snd_nxt {
                     self.tcb.snd_una = ack_number;
+                    // pop all acknowledged segments from the retransmission queue
+                    while let Some(rt) = self.retransmission.front() {
+                        if rt.seq_number() + rt.segment_len() <= ack_number {
+                            self.retransmission.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
                 } else if ack_number > self.tcb.snd_nxt {
                     return Reaction::NotAcceptable(Some(self.build_ack(&[])));
                 }
@@ -441,6 +452,7 @@ where
             local: self.local,
             remote: self.remote,
             tcb: self.tcb,
+            retransmission: self.retransmission,
             _marker: PhantomData,
         }
     }
@@ -452,12 +464,7 @@ impl Tcp<SynRcvd> {
         match self.accept(&ack) {
             Reaction::Acceptable(None, None) => {
                 info!("SynRcvd: got ack: {:?}", ack);
-                Tcp {
-                    local: self.local,
-                    remote: self.remote,
-                    tcb: self.tcb,
-                    _marker: PhantomData,
-                }
+                self.transition()
             }
             Reaction::Acceptable(_, _) => todo!(),
             Reaction::NotAcceptable(_) => todo!(),
@@ -475,15 +482,7 @@ impl Tcp<Established> {
     pub fn recv_fin(mut self, fin: &FinAck) -> (Tcp<CloseWait>, Ack) {
         let fin = self.parse(fin);
         match self.accept(&fin) {
-            Reaction::Acceptable(Some(ack), None) => (
-                Tcp {
-                    local: self.local,
-                    remote: self.remote,
-                    tcb: self.tcb,
-                    _marker: PhantomData,
-                },
-                ack,
-            ),
+            Reaction::Acceptable(Some(ack), None) => (self.transition(), ack),
             Reaction::Acceptable(_, _) => todo!(),
             Reaction::NotAcceptable(_) => todo!(),
             Reaction::Reset(_) => todo!(),
@@ -491,12 +490,21 @@ impl Tcp<Established> {
     }
 
     pub fn send(&mut self, data: &[u8]) -> Ack {
-        self.build_ack(data)
+        let ack = self.build_ack(data);
+        self.retransmission.push_back(ack.packet.clone());
+        ack
     }
 
     pub fn close(mut self) -> (Tcp<FinWait1>, FinAck) {
         let fin = self.build_fin();
         (self.transition(), fin)
+    }
+
+    pub fn retransmission(&self) -> Option<Ack> {
+        warn!("retransmission");
+        self.retransmission
+            .get(0)
+            .map(|p| Ack { packet: p.clone() })
     }
 }
 
@@ -504,12 +512,7 @@ impl Tcp<FinWait1> {
     pub fn recv(mut self, ack: &Ack) -> Tcp<FinWait2> {
         let ack = self.parse(ack);
         match self.accept(&ack) {
-            Reaction::Acceptable(None, None) => Tcp {
-                local: self.local,
-                remote: self.remote,
-                tcb: self.tcb,
-                _marker: PhantomData,
-            },
+            Reaction::Acceptable(None, None) => self.transition(),
             Reaction::Acceptable(_, _) => todo!(),
             Reaction::NotAcceptable(_) => todo!(),
             Reaction::Reset(_) => todo!(),
@@ -573,7 +576,7 @@ impl Tcp<LastAck> {
 }
 
 impl Tcp<_ForPicker> {
-    pub fn acceptable<T>(mut self, packet: &TcpPacket<T>) -> bool
+    pub fn acceptable<T>(mut self, packet: &TcpPacket<T>) -> Reaction
     where
         T: AsRef<[u8]>,
     {
@@ -584,10 +587,6 @@ impl Tcp<_ForPicker> {
             &self.local.checksum_caps,
         )
         .unwrap();
-        match self.accept(&packet) {
-            Reaction::Acceptable(_, _) => true,
-            Reaction::NotAcceptable(_) => false,
-            Reaction::Reset(_) => false,
-        }
+        self.accept(&packet)
     }
 }

@@ -6,6 +6,7 @@ pub mod st_macros;
 pub mod tcp;
 
 use paste::paste;
+use st::Timeout;
 use std::marker::PhantomData;
 
 use crate::cb::{Close, Connected, Data, Open, TcbCreated};
@@ -67,6 +68,9 @@ Rec!(pub ServerSystemCommLoop, [
             ServerSystemCloseWait,
         Ack. // unacceptable
             (RoleClientSystem + Ack /* challenge */).
+            ServerSystemCommLoop,
+        Timeout.
+            (RoleClientSystem + Ack /* retransmission */).
             ServerSystemCommLoop
     })
 ]);

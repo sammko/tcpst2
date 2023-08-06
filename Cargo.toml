@@ -21,3 +21,4 @@ smoltcp = { version = "0.10.0", default-features = false, features = [
     "socket-raw",
     "medium-ip",
 ] }
+thiserror = "1.0.44"

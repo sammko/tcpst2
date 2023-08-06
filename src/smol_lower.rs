@@ -1,11 +1,13 @@
-use anyhow::Result;
 use log::{debug, info};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{wait as phy_wait, ChecksumCapabilities, Device, Medium, TunTapInterface};
-use smoltcp::socket::raw;
+use smoltcp::socket::raw::{self, RecvError as SmolRecvError};
 use smoltcp::time::Instant;
-use smoltcp::wire::{IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv4Packet, Ipv4Repr, TcpPacket};
+use smoltcp::wire::{
+    self, IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv4Packet, Ipv4Repr, TcpPacket,
+};
 use std::os::fd::AsRawFd;
+use thiserror::Error;
 
 pub struct SmolLower<'a> {
     addr: Ipv4Address,
@@ -16,8 +18,23 @@ pub struct SmolLower<'a> {
     raw_sock_handle: SocketHandle,
 }
 
+#[derive(Error, Debug)]
+pub enum RecvError {
+    #[error("receive timed out")]
+    Timeout,
+
+    #[error("received malformed IP packet")]
+    MalformedIp(wire::Error),
+
+    #[error("received malformed TCP packet")]
+    MalformedTcp(wire::Error),
+
+    #[error("other receive error")]
+    RecvError(SmolRecvError),
+}
+
 impl SmolLower<'_> {
-    pub fn new(local_addr: Ipv4Address) -> Result<Self> {
+    pub fn new(local_addr: Ipv4Address) -> anyhow::Result<Self> {
         let mut device = TunTapInterface::new("tun-st", Medium::Ip)?;
         let config = Config::new(smoltcp::wire::HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut device, Instant::now());
@@ -58,7 +75,7 @@ impl SmolLower<'_> {
         self.device.capabilities().checksum
     }
 
-    pub fn send(&mut self, dst: Ipv4Address, payload: &[u8]) -> Result<()> {
+    pub fn send(&mut self, dst: Ipv4Address, payload: &[u8]) -> anyhow::Result<()> {
         let caps = self.checksum_caps();
         let socket = self.sockets.get_mut::<raw::Socket>(self.raw_sock_handle);
 
@@ -83,15 +100,24 @@ impl SmolLower<'_> {
         Ok(())
     }
 
-    pub fn recv(&mut self) -> Result<(Ipv4Address, TcpPacket<Vec<u8>>)> {
+    pub fn recv(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<(Ipv4Address, TcpPacket<Vec<u8>>), RecvError> {
         loop {
             let timestamp = Instant::now();
+
+            if let Some(time_limit) = deadline {
+                if timestamp >= time_limit {
+                    return Err(RecvError::Timeout);
+                }
+            }
 
             let socket = self.sockets.get_mut::<raw::Socket>(self.raw_sock_handle);
 
             if socket.can_recv() {
-                let raw = socket.recv()?;
-                let ipv4_packet = Ipv4Packet::new_checked(raw)?;
+                let raw = socket.recv().map_err(RecvError::RecvError)?;
+                let ipv4_packet = Ipv4Packet::new_checked(raw).map_err(RecvError::MalformedIp)?;
 
                 if ipv4_packet.dst_addr() != self.addr {
                     debug!("Skipping packet for {}", ipv4_packet.dst_addr());
@@ -100,7 +126,8 @@ impl SmolLower<'_> {
 
                 assert_eq!(ipv4_packet.next_header(), IpProtocol::Tcp);
 
-                let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload().to_owned())?;
+                let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload().to_owned())
+                    .map_err(RecvError::MalformedTcp)?;
 
                 if tcp_packet.dst_port() != self.listen_port {
                     continue;
@@ -109,11 +136,7 @@ impl SmolLower<'_> {
                 return Ok((ipv4_packet.src_addr(), tcp_packet));
             }
 
-            phy_wait(
-                self.device.as_raw_fd(),
-                self.interface.poll_delay(timestamp, &self.sockets),
-            )
-            .unwrap();
+            phy_wait(self.device.as_raw_fd(), deadline.map(|t| t - timestamp)).unwrap();
 
             self.interface
                 .poll(timestamp, &mut self.device, &mut self.sockets);

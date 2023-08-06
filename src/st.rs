@@ -187,3 +187,6 @@ where
         Nested::Right(m2) => Branch::Right((m2, A2::new())),
     }
 }
+
+pub struct Timeout;
+impl Message for Timeout {}

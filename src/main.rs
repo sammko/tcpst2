@@ -5,11 +5,11 @@ use anyhow::Result;
 use crossbeam_channel::unbounded;
 use log::{info, warn};
 
-use smoltcp::wire::TcpPacket;
+use smoltcp::time::Duration;
 use tcpst2::cb::{Close, Connected, CrossBeamRoleChannel, Data, Open, TcbCreated};
 use tcpst2::smol_channel::SmolChannel;
 use tcpst2::smol_lower::SmolLower;
-use tcpst2::st::{nested_offer_two, Action, Branch, Choice, Nested};
+use tcpst2::st::{nested_offer_two, Action, Branch, Choice, Nested, Timeout};
 use tcpst2::tcp::{LocalAddr, Reaction, TcpClosed};
 use tcpst2::{
     RoleClientSystem, RoleServerSystem, RoleServerUser, ServerSystemSessionType,
@@ -25,7 +25,7 @@ struct CmdlineArgs {
 
 fn main() -> Result<()> {
     pretty_env_logger::formatted_builder()
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(log::LevelFilter::Info)
         .init();
 
     let args = argh::from_env::<CmdlineArgs>();
@@ -70,16 +70,17 @@ fn main() -> Result<()> {
                             std::str::from_utf8(&message).unwrap_or("<invalid utf8>")
                         );
 
-                        if message.len() > 1 {
-                            let len = message.len();
-                            message[..len - 1].reverse();
-                            recursive = user_system_channel.select_left(st, Data { data: message });
-                            continue;
-                        } else {
+                        if message.len() <= 1 {
                             let st = user_system_channel.select_right(st, Close {});
                             user_system_channel.close(st);
                             break 'top;
                         }
+
+                        message
+                            .split_mut(|b| *b == 0x0a)
+                            .for_each(|line| line.reverse());
+                        recursive = user_system_channel.select_left(st, Data { data: message });
+                        continue;
                     }
                     Branch::Right((_close, recursive)) => {
                         let st = recursive.inner();
@@ -127,26 +128,36 @@ fn main() -> Result<()> {
             info!("established");
 
             let mut recursive = st;
+            let mut timeout = None;
             'top: loop {
                 let st = recursive.inner();
 
                 let tcp_for_picker = tcp.for_picker();
+                let timeout2 = timeout;
+                timeout = None; // reset timeout for next iteration
                 match net_channel.offer_two_filtered(
                     st,
                     move |packet| {
-                        if packet.fin() {
-                            Branch::Right(Nested::Right(Nested::Left(packet.into())))
-                        } else {
-                            match tcp_for_picker.acceptable(&packet) {
-                                true => match TcpPacket::new_unchecked(&packet).payload().len() {
-                                    0 => Branch::Right(Nested::Left(packet.into())),
-                                    _ => Branch::Left(packet.into()),
-                                },
-                                false => Branch::Right(Nested::Right(Nested::Right(packet.into()))),
+                        if let Some(packet) = packet {
+                            if packet.fin() {
+                                Branch::Right(Nested::Right(Nested::Left(packet.into())))
+                            } else {
+                                match tcp_for_picker.acceptable(&packet) {
+                                    Reaction::Acceptable(_, Some(_)) => Branch::Left(packet.into()),
+                                    Reaction::Acceptable(_, None) => {
+                                        Branch::Right(Nested::Left(packet.into()))
+                                    }
+                                    _ => Branch::Right(Nested::Right(Nested::Right(Nested::Left(
+                                        packet.into(),
+                                    )))),
+                                }
                             }
+                        } else {
+                            Branch::Right(Nested::Right(Nested::Right(Nested::Right(Timeout))))
                         }
                     },
                     &tcp,
+                    timeout2,
                 ) {
                     Branch::Left((acceptable_with_data, st)) => {
                         let (resp, data): (_, &[u8]) = match tcp.recv(&acceptable_with_data) {
@@ -179,7 +190,7 @@ fn main() -> Result<()> {
                                 let tx = tcp.send(&data.data);
                                 let st = net_channel.select_one(st, tcp.remote_addr(), tx);
                                 recursive = st;
-                                continue 'top;
+                                timeout = Some(Duration::from_secs(1));
                             }
                             Branch::Right((_close, st)) => {
                                 let (tcp, fin) = tcp.close();
@@ -193,6 +204,7 @@ fn main() -> Result<()> {
                                     match net_channel.offer_two_filtered(
                                         st,
                                         |packet| {
+                                            let packet = packet.unwrap();
                                             if packet.fin() {
                                                 Branch::Right(packet.into())
                                             } else {
@@ -200,6 +212,7 @@ fn main() -> Result<()> {
                                             }
                                         },
                                         &tcp,
+                                        None,
                                     ) {
                                         Branch::Left((ack, st)) => {
                                             // We have received data from the Client, but we
@@ -231,7 +244,6 @@ fn main() -> Result<()> {
                                 match tcp.recv(&acceptable_empty) {
                                     Reaction::Acceptable(None, None) => {
                                         recursive = st;
-                                        continue 'top;
                                     }
                                     Reaction::Acceptable(_, _) => unreachable!(),
                                     Reaction::NotAcceptable(_) => unreachable!(),
@@ -266,7 +278,6 @@ fn main() -> Result<()> {
                                                         net_channel.offer_one_filtered(st, &tcp);
                                                     tcp.recv_ack(&ack);
                                                     recursive = st;
-                                                    continue;
                                                 }
                                                 Branch::Right((_close, st)) => {
                                                     let (tcp, fin) = tcp.close();
@@ -284,19 +295,36 @@ fn main() -> Result<()> {
                                             }
                                         }
                                     }
-                                    Branch::Right((not_acceptable, st)) => {
-                                        warn!("Not acceptable");
-                                        let challenge = match tcp.recv(&not_acceptable) {
-                                            Reaction::Acceptable(_, _) => unreachable!(),
-                                            Reaction::NotAcceptable(Some(challenge)) => challenge,
-                                            Reaction::NotAcceptable(None) => todo!(),
-                                            Reaction::Reset(_) => todo!(),
-                                        };
-                                        recursive = net_channel.select_one(
-                                            st,
-                                            tcp.remote_addr(),
-                                            challenge,
-                                        );
+                                    Branch::Right((nested, st)) => {
+                                        match nested_offer_two(st, nested) {
+                                            Branch::Left((not_acceptable, st)) => {
+                                                warn!("Not acceptable");
+                                                let challenge = match tcp.recv(&not_acceptable) {
+                                                    Reaction::Acceptable(_, _) => unreachable!(),
+                                                    Reaction::NotAcceptable(Some(challenge)) => {
+                                                        challenge
+                                                    }
+                                                    Reaction::NotAcceptable(None) => todo!(),
+                                                    Reaction::Reset(_) => todo!(),
+                                                };
+                                                recursive = net_channel.select_one(
+                                                    st,
+                                                    tcp.remote_addr(),
+                                                    challenge,
+                                                );
+                                            }
+                                            Branch::Right((_, st)) => {
+                                                let ack = tcp
+                                                    .retransmission()
+                                                    .expect("Nothing to retransmit");
+                                                recursive = net_channel.select_one(
+                                                    st,
+                                                    tcp.remote_addr(),
+                                                    ack,
+                                                );
+                                                timeout = Some(Duration::from_secs(1));
+                                            }
+                                        }
                                     }
                                 }
                             }

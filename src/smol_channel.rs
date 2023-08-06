@@ -1,9 +1,12 @@
 use std::marker::PhantomData;
 
-use smoltcp::wire::{Ipv4Address, TcpPacket};
+use smoltcp::{
+    time::{Duration, Instant},
+    wire::{Ipv4Address, TcpPacket},
+};
 
 use crate::{
-    smol_lower::SmolLower,
+    smol_lower::{RecvError, SmolLower},
     st::{Action, Branch, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo},
     tcp::ChannelFilter,
 };
@@ -45,7 +48,7 @@ where
         F: ChannelFilter<TcpPacket<Vec<u8>>>,
     {
         let (addr, buf) = loop {
-            let (addr, buf) = self.lower.recv().expect("recv failed");
+            let (addr, buf) = self.lower.recv(None).expect("recv failed");
             if filter.filter(addr, &buf) {
                 break (addr, buf);
             }
@@ -68,6 +71,7 @@ where
         _o: OfferTwo<R2, M1, M2, A1, A2>,
         picker: P,
         filter: &F,
+        timeout: Option<Duration>,
     ) -> Branch<(M1, A1), (M2, A2)>
     where
         R1: Role,
@@ -76,13 +80,18 @@ where
         M2: Message,
         A1: Action,
         A2: Action,
-        P: FnOnce(TcpPacket<Vec<u8>>) -> Branch<M1, M2>,
+        P: FnOnce(Option<TcpPacket<Vec<u8>>>) -> Branch<M1, M2>,
         F: ChannelFilter<TcpPacket<Vec<u8>>>,
     {
+        let deadline = timeout.map(|t| Instant::now() + t);
         let buf = loop {
-            let (addr, buf) = self.lower.recv().expect("recv failed");
+            let (addr, buf) = match self.lower.recv(deadline) {
+                Ok(m) => m,
+                Err(RecvError::Timeout) => break None,
+                Err(_) => panic!("recv failed"),
+            };
             if filter.filter(addr, &buf) {
-                break buf;
+                break Some(buf);
             }
         };
         match picker(buf) {
