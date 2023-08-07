@@ -25,6 +25,15 @@ struct CmdlineArgs {
     local_addr: Ipv4Addr,
 }
 
+macro_rules! not_in_st {
+    () => {
+        panic!("not represented in session type")
+    };
+    ($($arg:tt)*) => {
+        panic!("not represented in session type: {}", format!($($arg)*))
+    }
+}
+
 fn main() -> Result<()> {
     pretty_env_logger::formatted_builder()
         .filter_level(log::LevelFilter::Info)
@@ -144,14 +153,10 @@ fn main() -> Result<()> {
                     None,
                 ) {
                     Branch::Left((acceptable, st)) => {
-                        let tcp = match tcp.recv_ack(&acceptable) {
-                            Reaction::Acceptable(tcp, None, None) => tcp,
-                            Reaction::Acceptable(_, _, _) => {
-                                unimplemented!("First ACK with data not supported")
-                            }
-                            Reaction::NotAcceptable(_, _) => unreachable!(),
-                            Reaction::Reset(_) => unreachable!(),
-                        };
+                        let tcp = tcp
+                            .recv_ack(&acceptable)
+                            .empty_acceptable()
+                            .expect("First ACK must be empty");
                         break (tcp, st);
                     }
                     Branch::Right((unacceptable, st)) => {
@@ -193,6 +198,7 @@ fn main() -> Result<()> {
                     move |packet| {
                         if let Some(packet) = packet {
                             if packet.fin() {
+                                // TODO unacceptable FINs are not handled properly
                                 Branch::Right(Nested::Right(Nested::Left(packet.into())))
                             } else {
                                 match tcp_for_picker.acceptable(&packet) {
@@ -246,7 +252,10 @@ fn main() -> Result<()> {
                                 let st = net_channel.select_one(st, tcp.remote_addr(), fin);
 
                                 let (rx, mut recursive) = net_channel.offer_one_filtered(st, &tcp);
-                                let mut tcp = tcp.recv(&rx);
+                                let mut tcp = tcp
+                                    .recv(&rx)
+                                    .empty_acceptable()
+                                    .expect("FIN of ACK must be empty");
 
                                 loop {
                                     let st = recursive.inner();
@@ -286,18 +295,19 @@ fn main() -> Result<()> {
                         }
                     }
                     Branch::Right((nested, st)) => match nested_offer_two(st, nested) {
-                        Branch::Left((acceptable_empty, st)) => match tcp.recv(&acceptable_empty) {
-                            Reaction::Acceptable(tcp2, None, None) => {
-                                tcp = tcp2;
-                                recursive = st;
-                            }
-                            Reaction::Acceptable(_, _, _) => unreachable!(),
-                            Reaction::NotAcceptable(_, _) => unreachable!(),
-                            Reaction::Reset(_) => unreachable!(),
-                        },
+                        Branch::Left((acceptable_empty, st)) => {
+                            tcp = tcp.recv(&acceptable_empty).empty_acceptable().unwrap();
+                            recursive = st;
+                        }
                         Branch::Right((nested, st)) => match nested_offer_two(st, nested) {
                             Branch::Left((fin, st)) => {
-                                let (mut tcp, ack) = tcp.recv_fin(&fin);
+                                let (mut tcp, ack) = match tcp.recv_fin(&fin) {
+                                    Reaction::Acceptable(_, _, Some(_)) => todo!("payload in FIN"),
+                                    Reaction::Acceptable(tcp, Some(ack), None) => (tcp, ack),
+                                    Reaction::Acceptable(_, None, _) => unreachable!(),
+                                    Reaction::NotAcceptable(_, _) => not_in_st!("bad FIN"),
+                                    Reaction::Reset(_) => not_in_st!("reset from bad FIN"),
+                                };
                                 let st = net_channel.select_one(st, tcp.remote_addr(), ack);
                                 let mut recursive = system_user_channel.select_one(st, Close(()));
                                 loop {
@@ -341,8 +351,8 @@ fn main() -> Result<()> {
                                         Reaction::NotAcceptable(tcp, Some(challenge)) => {
                                             (tcp, challenge)
                                         }
-                                        Reaction::NotAcceptable(_, None) => todo!(),
-                                        Reaction::Reset(_) => todo!(),
+                                        Reaction::NotAcceptable(_, None) => not_in_st!(),
+                                        Reaction::Reset(_) => not_in_st!(),
                                     };
                                     recursive =
                                         net_channel.select_one(st, tcp.remote_addr(), challenge);

@@ -1,26 +1,3 @@
-macro_rules! cb_message {
-    ($name:ident, $data:ty) => {
-        pub struct $name(pub $data);
-        impl Message for $name {}
-        impl CrossbeamMessage for $name {
-            fn to_net_representation(self) -> NetRepresentation {
-                NetRepresentation::$name(self)
-            }
-            fn from_net_representation(net: NetRepresentation) -> Self {
-                if let NetRepresentation::$name(msg) = net {
-                    msg
-                } else {
-                    panic!("Wrong message type")
-                }
-            }
-        }
-    };
-    ($name:ident) => {
-        cb_message!($name, ());
-    };
-}
-pub(crate) use cb_message;
-
 macro_rules! Role {
     (pub $name:ident) => {
         pub struct $name;

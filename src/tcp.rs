@@ -224,6 +224,13 @@ where
             ReactionInner::Reset(response) => Reaction::Reset(response),
         }
     }
+
+    pub fn empty_acceptable(self) -> Option<Tcp<Ta>> {
+        match self {
+            Reaction::Acceptable(tcp, None, None) => Some(tcp),
+            _ => None,
+        }
+    }
 }
 
 impl<T> Tcp<T>
@@ -385,7 +392,6 @@ where
                         self.tcb.snd_wnd = seg.window_len;
                         self.tcb.snd_wl1 = seg.seq_number;
                         self.tcb.snd_wl2 = ack_number;
-                        return ReactionInner::Acceptable(None, None);
                     } else {
                         return ReactionInner::Reset(Some(self.build_reset(ack_number)));
                     }
@@ -481,26 +487,21 @@ where
 }
 
 impl Tcp<SynRcvd> {
-    pub fn recv_ack(mut self, ack: &Ack) -> Reaction<'_, Established, SynRcvd> {
+    pub fn recv_ack(mut self, ack: &Ack) -> Reaction<Established, SynRcvd> {
         let ack = self.parse(ack);
         Reaction::from_inner(self.accept(&ack), self)
     }
 }
 
 impl Tcp<Established> {
-    pub fn recv<'a>(mut self, ack: &'a Ack) -> Reaction<'a, Established, Established> {
-        let ack: TcpRepr<'a> = self.parse(ack);
+    pub fn recv(mut self, ack: &Ack) -> Reaction<Established, Established> {
+        let ack = self.parse(ack);
         Reaction::from_inner(self.accept(&ack), self)
     }
 
-    pub fn recv_fin(mut self, fin: &FinAck) -> (Tcp<CloseWait>, Ack) {
+    pub fn recv_fin(mut self, fin: &FinAck) -> Reaction<CloseWait, Established> {
         let fin = self.parse(fin);
-        match self.accept(&fin) {
-            ReactionInner::Acceptable(Some(ack), None) => (self.transition(), ack),
-            ReactionInner::Acceptable(_, _) => todo!(),
-            ReactionInner::NotAcceptable(_) => todo!(),
-            ReactionInner::Reset(_) => todo!(),
-        }
+        Reaction::from_inner(self.accept(&fin), self)
     }
 
     pub fn send(&mut self, data: &[u8]) -> Ack {
@@ -523,14 +524,9 @@ impl Tcp<Established> {
 }
 
 impl Tcp<FinWait1> {
-    pub fn recv(mut self, ack: &Ack) -> Tcp<FinWait2> {
+    pub fn recv(mut self, ack: &Ack) -> Reaction<FinWait2, FinWait1> {
         let ack = self.parse(ack);
-        match self.accept(&ack) {
-            ReactionInner::Acceptable(None, None) => self.transition(),
-            ReactionInner::Acceptable(_, _) => todo!(),
-            ReactionInner::NotAcceptable(_) => todo!(),
-            ReactionInner::Reset(_) => todo!(),
-        }
+        Reaction::from_inner(self.accept(&ack), self)
     }
 }
 
