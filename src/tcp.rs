@@ -45,10 +45,9 @@ mod tcp_state {
 }
 use tcp_state::*;
 
-#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 struct Tcb {
-    iss: TcpSeqNumber,
+    // iss: TcpSeqNumber,
     snd_una: TcpSeqNumber,
     snd_nxt: TcpSeqNumber,
 
@@ -56,7 +55,7 @@ struct Tcb {
     snd_wl1: TcpSeqNumber,
     snd_wl2: TcpSeqNumber,
 
-    irs: TcpSeqNumber,
+    // irs: TcpSeqNumber,
     rcv_nxt: TcpSeqNumber,
     rcv_wnd: u16,
 }
@@ -101,7 +100,7 @@ impl TcpListen {
 
         let iss = TcpSeqNumber(123); // TODO generate random
         let mut tcb = Tcb {
-            irs: syn.seq_number,
+            // irs: syn.seq_number,
             rcv_nxt: syn.seq_number + syn.segment_len(),
             rcv_wnd: 1000,
 
@@ -111,7 +110,7 @@ impl TcpListen {
             snd_wl1: syn.seq_number,
             snd_wl2: iss,
 
-            iss,
+            // iss,
             snd_una: iss,
             snd_nxt: iss,
             snd_wnd: syn.window_len,
