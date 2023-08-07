@@ -146,6 +146,7 @@ where
     }
 }
 
+#[derive(Copy, Clone)]
 pub struct End {}
 
 impl Action for End {

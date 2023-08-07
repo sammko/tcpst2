@@ -6,12 +6,13 @@ pub mod st_macros;
 pub mod tcp;
 
 use paste::paste;
-use st::Timeout;
 use std::marker::PhantomData;
 
 use crate::cb::{Close, Connected, Data, Open, TcbCreated};
-use crate::smol_channel::{Ack, FinAck, Syn, SynAck};
-use crate::st::{Action, End, NestRole, Nested, OfferOne, OfferTwo, Role, SelectOne, SelectTwo};
+use crate::smol_channel::{Ack, FinAck, Rst, Syn, SynAck};
+use crate::st::{
+    Action, End, NestRole, Nested, OfferOne, OfferTwo, Role, SelectOne, SelectTwo, Timeout,
+};
 use crate::st_macros::{Nest, Rec, Role, St};
 
 Role!(pub RoleServerSystem);
@@ -75,14 +76,26 @@ Rec!(pub ServerSystemCommLoop, [
     })
 ]);
 
+Rec!(pub ServerSystemSynRcvd, [
+    (RoleClientSystem & {
+        Ack. // acceptable
+            (RoleServerUser + Connected).
+            ServerSystemCommLoop,
+        Ack. // unacceptable
+            (RoleClientSystem + {
+                Ack.ServerSystemSynRcvd,
+                Rst.(RoleServerUser + Close).end
+            })
+    })
+
+]);
+
 pub type ServerSystemSessionType = St![
     (RoleServerUser & Open).
     (RoleServerUser + TcbCreated).
     (RoleClientSystem & Syn).
     (RoleClientSystem + SynAck).
-    (RoleClientSystem & Ack).
-    (RoleServerUser + Connected).
-    ServerSystemCommLoop
+    ServerSystemSynRcvd
 ];
 
 Rec!(pub ServerUserCloseWait, [
@@ -106,6 +119,8 @@ Rec!(pub ServerUserCommLoop, [
 pub type ServerUserSessionType = St![
     (RoleServerSystem + Open).
     (RoleServerSystem & TcbCreated).
-    (RoleServerSystem & Connected).
-    ServerUserCommLoop
+    (RoleServerSystem & {
+        Connected.ServerUserCommLoop,
+        Close.end
+    })
 ];

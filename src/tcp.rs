@@ -1,9 +1,13 @@
-use log::{info, warn};
+use log::{debug, info, warn};
 use smoltcp::{
     phy::ChecksumCapabilities,
     wire::{IpAddress, Ipv4Address, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber},
 };
-use std::{any::TypeId, collections::VecDeque, marker::PhantomData};
+use std::{
+    any::{type_name, TypeId},
+    collections::VecDeque,
+    marker::PhantomData,
+};
 
 use crate::smol_channel::{Ack, FinAck, Rst, SmolMessage, Syn, SynAck};
 
@@ -35,17 +39,9 @@ mod tcp_state {
         }
     }
 
-    impl_tcp_state!(
-        SynRcvd,
-        Established,
-        FinWait1,
-        FinWait2,
-        CloseWait,
-        LastAck,
-        _ForPicker
-    );
+    impl_tcp_state!(SynRcvd, Established, FinWait1, FinWait2, CloseWait, LastAck);
 
-    pub trait TcpState {}
+    pub trait TcpState: Clone {}
 }
 use tcp_state::*;
 
@@ -71,16 +67,15 @@ pub struct TcpListen {
 }
 
 #[derive(Clone, Debug)]
-pub struct Tcp<State>
-where
-    State: TcpState + Clone,
-{
+pub struct Tcp<State> {
     local: LocalAddr,
     remote: RemoteAddr,
     tcb: Tcb,
     retransmission: VecDeque<TcpPacket<Vec<u8>>>,
     _marker: PhantomData<State>,
 }
+
+pub struct TcpForPicker<S>(Tcp<S>);
 
 impl TcpClosed {
     pub fn new() -> Self {
@@ -203,10 +198,33 @@ where
 }
 
 #[must_use]
-pub enum Reaction<'a> {
+pub enum ReactionInner<'a> {
     Acceptable(Option<Ack>, Option<&'a [u8]>),
     NotAcceptable(Option<Ack>),
     Reset(Option<Rst>),
+}
+
+#[must_use]
+pub enum Reaction<'a, Ta, Tn> {
+    Acceptable(Tcp<Ta>, Option<Ack>, Option<&'a [u8]>),
+    NotAcceptable(Tcp<Tn>, Option<Ack>),
+    Reset(Option<Rst>),
+}
+
+impl<Ta, Tn> Reaction<'_, Ta, Tn>
+where
+    Ta: TcpState,
+    Tn: TcpState,
+{
+    fn from_inner(inner: ReactionInner, tcp: Tcp<Tn>) -> Reaction<'_, Ta, Tn> {
+        match inner {
+            ReactionInner::Acceptable(response, data) => {
+                Reaction::Acceptable(tcp.transition(), response, data)
+            }
+            ReactionInner::NotAcceptable(response) => Reaction::NotAcceptable(tcp, response),
+            ReactionInner::Reset(response) => Reaction::Reset(response),
+        }
+    }
 }
 
 impl<T> Tcp<T>
@@ -264,12 +282,12 @@ where
         }
     }
 
-    fn build_reset(&self) -> Rst {
+    fn build_reset(&self, seq: TcpSeqNumber) -> Rst {
         let repr = TcpRepr {
             src_port: self.local.port,
             dst_port: self.remote.port,
             control: TcpControl::Rst,
-            seq_number: self.tcb.snd_nxt,
+            seq_number: seq,
             ack_number: None,
             window_len: self.tcb.rcv_wnd,
             window_scale: None,
@@ -320,19 +338,19 @@ where
         }
     }
 
-    fn accept<'a>(&mut self, seg: &TcpRepr<'a>) -> Reaction<'a> {
+    fn accept<'a>(&mut self, seg: &TcpRepr<'a>) -> ReactionInner<'a> {
         if !self.is_seg_acceptable(seg) {
             let reply = if seg.control == TcpControl::Rst {
                 None
             } else {
                 Some(self.build_ack(&[]))
             };
-            return Reaction::NotAcceptable(reply);
+            return ReactionInner::NotAcceptable(reply);
         }
 
         if seg.seq_number > self.tcb.rcv_nxt {
             warn!("gap before received segment, ignoring");
-            return Reaction::Acceptable(None, None);
+            return ReactionInner::Acceptable(None, None);
         }
 
         let payload = seg
@@ -344,17 +362,17 @@ where
         if seg.control == TcpControl::Rst {
             if seg.seq_number == self.tcb.rcv_nxt {
                 // clean reset
-                return Reaction::Reset(None);
+                return ReactionInner::Reset(None);
             }
             // challenge ACK
-            return Reaction::NotAcceptable(Some(self.build_ack(&[])));
+            return ReactionInner::NotAcceptable(Some(self.build_ack(&[])));
         }
 
         // ignore Security
 
         if seg.control == TcpControl::Syn {
             // TODO not sure if this is right
-            return Reaction::NotAcceptable(Some(self.build_ack(&[])));
+            return ReactionInner::NotAcceptable(Some(self.build_ack(&[])));
         }
 
         match seg.ack_number {
@@ -368,9 +386,9 @@ where
                         self.tcb.snd_wnd = seg.window_len;
                         self.tcb.snd_wl1 = seg.seq_number;
                         self.tcb.snd_wl2 = ack_number;
-                        return Reaction::Acceptable(None, None);
+                        return ReactionInner::Acceptable(None, None);
                     } else {
-                        return Reaction::Reset(Some(self.build_reset()));
+                        return ReactionInner::Reset(Some(self.build_reset(ack_number)));
                     }
                 }
 
@@ -385,7 +403,7 @@ where
                         }
                     }
                 } else if ack_number > self.tcb.snd_nxt {
-                    return Reaction::NotAcceptable(Some(self.build_ack(&[])));
+                    return ReactionInner::NotAcceptable(Some(self.build_ack(&[])));
                 }
 
                 // SND.UNA =< SEG.ACK =< SND.NXT
@@ -402,7 +420,7 @@ where
                 // ignore URG
 
                 self.tcb.rcv_nxt = seg.seq_number + seg.segment_len();
-                Reaction::Acceptable(
+                ReactionInner::Acceptable(
                     if seg.segment_len() > 0 {
                         Some(self.build_ack(&[]))
                     } else {
@@ -415,7 +433,7 @@ where
                     },
                 )
             }
-            None => Reaction::NotAcceptable(None),
+            None => ReactionInner::NotAcceptable(None),
         }
     }
 
@@ -432,9 +450,9 @@ where
         .unwrap()
     }
 
-    pub fn for_picker(&self) -> Tcp<_ForPicker> {
+    pub fn for_picker(&self) -> TcpForPicker<T> {
         let clone = (*self).clone();
-        clone.transition()
+        TcpForPicker(clone)
     }
 }
 
@@ -448,6 +466,11 @@ where
     U: TcpState + Clone,
 {
     fn transition(self) -> Tcp<T> {
+        debug!(
+            "transition from {:?} to {:?}",
+            type_name::<U>(),
+            type_name::<T>()
+        );
         Tcp {
             local: self.local,
             remote: self.remote,
@@ -459,33 +482,25 @@ where
 }
 
 impl Tcp<SynRcvd> {
-    pub fn recv_ack(mut self, ack: &Ack) -> Tcp<Established> {
+    pub fn recv_ack(mut self, ack: &Ack) -> Reaction<'_, Established, SynRcvd> {
         let ack = self.parse(ack);
-        match self.accept(&ack) {
-            Reaction::Acceptable(None, None) => {
-                info!("SynRcvd: got ack: {:?}", ack);
-                self.transition()
-            }
-            Reaction::Acceptable(_, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
-        }
+        Reaction::from_inner(self.accept(&ack), self)
     }
 }
 
 impl Tcp<Established> {
-    pub fn recv<'a>(&mut self, ack: &'a Ack) -> Reaction<'a> {
+    pub fn recv<'a>(mut self, ack: &'a Ack) -> Reaction<'a, Established, Established> {
         let ack: TcpRepr<'a> = self.parse(ack);
-        self.accept(&ack)
+        Reaction::from_inner(self.accept(&ack), self)
     }
 
     pub fn recv_fin(mut self, fin: &FinAck) -> (Tcp<CloseWait>, Ack) {
         let fin = self.parse(fin);
         match self.accept(&fin) {
-            Reaction::Acceptable(Some(ack), None) => (self.transition(), ack),
-            Reaction::Acceptable(_, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
+            ReactionInner::Acceptable(Some(ack), None) => (self.transition(), ack),
+            ReactionInner::Acceptable(_, _) => todo!(),
+            ReactionInner::NotAcceptable(_) => todo!(),
+            ReactionInner::Reset(_) => todo!(),
         }
     }
 
@@ -512,10 +527,10 @@ impl Tcp<FinWait1> {
     pub fn recv(mut self, ack: &Ack) -> Tcp<FinWait2> {
         let ack = self.parse(ack);
         match self.accept(&ack) {
-            Reaction::Acceptable(None, None) => self.transition(),
-            Reaction::Acceptable(_, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
+            ReactionInner::Acceptable(None, None) => self.transition(),
+            ReactionInner::Acceptable(_, _) => todo!(),
+            ReactionInner::NotAcceptable(_) => todo!(),
+            ReactionInner::Reset(_) => todo!(),
         }
     }
 }
@@ -524,20 +539,20 @@ impl Tcp<FinWait2> {
     pub fn recv_ack(&mut self, ack: &Ack) -> Ack {
         let ack = self.parse(ack);
         match self.accept(&ack) {
-            Reaction::Acceptable(Some(ack), _) => ack,
-            Reaction::Acceptable(None, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
+            ReactionInner::Acceptable(Some(ack), _) => ack,
+            ReactionInner::Acceptable(None, _) => todo!(),
+            ReactionInner::NotAcceptable(_) => todo!(),
+            ReactionInner::Reset(_) => todo!(),
         }
     }
 
     pub fn recv_fin(mut self, fin: &FinAck) -> Ack {
         let fin = self.parse(fin);
         match self.accept(&fin) {
-            Reaction::Acceptable(Some(ack), _) => ack,
-            Reaction::Acceptable(None, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
+            ReactionInner::Acceptable(Some(ack), _) => ack,
+            ReactionInner::Acceptable(None, _) => todo!(),
+            ReactionInner::NotAcceptable(_) => todo!(),
+            ReactionInner::Reset(_) => todo!(),
         }
     }
 }
@@ -546,10 +561,10 @@ impl Tcp<CloseWait> {
     pub fn recv_ack(&mut self, ack: &Ack) {
         let ack = self.parse(ack);
         match self.accept(&ack) {
-            Reaction::Acceptable(None, None) => {}
-            Reaction::Acceptable(_, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
+            ReactionInner::Acceptable(None, None) => {}
+            ReactionInner::Acceptable(_, _) => todo!(),
+            ReactionInner::NotAcceptable(_) => todo!(),
+            ReactionInner::Reset(_) => todo!(),
         }
     }
 
@@ -567,26 +582,29 @@ impl Tcp<LastAck> {
     pub fn recv_ack(mut self, ack: &Ack) {
         let ack = self.parse(ack);
         match self.accept(&ack) {
-            Reaction::Acceptable(None, None) => {}
-            Reaction::Acceptable(_, _) => todo!(),
-            Reaction::NotAcceptable(_) => todo!(),
-            Reaction::Reset(_) => todo!(),
+            ReactionInner::Acceptable(None, None) => {}
+            ReactionInner::Acceptable(_, _) => todo!(),
+            ReactionInner::NotAcceptable(_) => todo!(),
+            ReactionInner::Reset(_) => todo!(),
         }
     }
 }
 
-impl Tcp<_ForPicker> {
-    pub fn acceptable<T>(mut self, packet: &TcpPacket<T>) -> Reaction
+impl<T> TcpForPicker<T>
+where
+    T: TcpState + 'static,
+{
+    pub fn acceptable<'a, U>(mut self, packet: &'a TcpPacket<U>) -> ReactionInner
     where
-        T: AsRef<[u8]>,
+        U: AsRef<[u8]>,
     {
         let packet = TcpRepr::parse(
             &TcpPacket::new_unchecked(packet.as_ref()),
-            &IpAddress::from(self.remote.addr),
-            &IpAddress::from(self.local.addr),
-            &self.local.checksum_caps,
+            &IpAddress::from(self.0.remote.addr),
+            &IpAddress::from(self.0.local.addr),
+            &self.0.local.checksum_caps,
         )
         .unwrap();
-        self.accept(&packet)
+        self.0.accept(&packet)
     }
 }

@@ -17,13 +17,29 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::{
     st::{Action, Branch, Choice, End, Message, OfferOne, OfferTwo, Role, SelectOne, SelectTwo},
-    st_macros::empty_cb_message,
+    st_macros::cb_message,
 };
 
-pub trait CrossbeamMessage: Message {
-    fn to_net_representation(self) -> Vec<u8>;
-    fn from_net_representation(packet: Vec<u8>) -> Self;
+pub enum NetRepresentation {
+    Open(Open),
+    TcbCreated(TcbCreated),
+    Connected(Connected),
+    Close(Close),
+    Data(Data),
 }
+
+impl NetRepresentation {}
+
+pub trait CrossbeamMessage: Message {
+    fn to_net_representation(self) -> NetRepresentation;
+    fn from_net_representation(packet: NetRepresentation) -> Self;
+}
+
+cb_message!(Open);
+cb_message!(TcbCreated);
+cb_message!(Connected);
+cb_message!(Close);
+cb_message!(Data, Vec<u8>);
 
 /// [CrossBeamRoleChannel] is a session-typed communication channel that uses crossbeam channels under the hood.
 /// [CrossBeamRoleChannel] behaves as any other session-typed channels and implements [SessionTypedChannel].
@@ -33,8 +49,8 @@ where
     R1: Role,
     R2: Role,
 {
-    pub send: Sender<Vec<u8>>,
-    pub recv: Receiver<Vec<u8>>,
+    pub send: Sender<NetRepresentation>,
+    pub recv: Receiver<NetRepresentation>,
     pub phantom: PhantomData<(R1, R2)>,
 }
 
@@ -43,7 +59,7 @@ where
     R1: Role,
     R2: Role,
 {
-    pub fn new(send: Sender<Vec<u8>>, recv: Receiver<Vec<u8>>) -> Self {
+    pub fn new(send: Sender<NetRepresentation>, recv: Receiver<NetRepresentation>) -> Self {
         CrossBeamRoleChannel {
             send,
             recv,
@@ -87,7 +103,7 @@ where
         M2: CrossbeamMessage,
         A1: Action,
         A2: Action,
-        F: FnOnce(&Vec<u8>) -> Choice,
+        F: FnOnce(&NetRepresentation) -> Choice,
     {
         let data = self.recv.recv().unwrap();
         let choice = picker(&data);
@@ -133,31 +149,5 @@ where
 
     pub fn close(self, _end: End) {
         drop(self);
-    }
-}
-
-empty_cb_message!(Open);
-empty_cb_message!(TcbCreated);
-empty_cb_message!(Connected);
-empty_cb_message!(Close);
-
-const MAGIC_DATA: u8 = 1;
-
-pub struct Data {
-    pub data: Vec<u8>,
-}
-
-impl Message for Data {}
-impl CrossbeamMessage for Data {
-    fn to_net_representation(self) -> Vec<u8> {
-        let mut data = vec![MAGIC_DATA];
-        data.extend(self.data);
-        data
-    }
-
-    fn from_net_representation(data: Vec<u8>) -> Self {
-        Data {
-            data: data[1..].to_vec(),
-        }
     }
 }
