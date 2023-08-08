@@ -150,9 +150,7 @@ impl TcpListen {
                 retransmission: Default::default(),
                 _marker: PhantomData,
             },
-            SynAck {
-                packet: TcpPacket::new_unchecked(resp_data),
-            },
+            SynAck::from_packet(TcpPacket::new_unchecked(resp_data)),
         )
     }
 }
@@ -277,15 +275,11 @@ where
     }
 
     fn build_ack(&mut self, payload: &[u8]) -> Ack {
-        Ack {
-            packet: self.build_ack_raw(payload, false),
-        }
+        Ack::from_packet(self.build_ack_raw(payload, false))
     }
 
     fn build_fin(&mut self) -> FinAck {
-        FinAck {
-            packet: self.build_ack_raw(&[], true),
-        }
+        FinAck::from_packet(self.build_ack_raw(&[], true))
     }
 
     fn build_reset(&self, seq: TcpSeqNumber) -> Rst {
@@ -312,9 +306,7 @@ where
             &self.local.checksum_caps,
         );
 
-        Rst {
-            packet: TcpPacket::new_unchecked(buf),
-        }
+        Rst::from_packet(TcpPacket::new_unchecked(buf))
     }
 
     /// Determine if a segment's sequence number and length are acceptable
@@ -506,7 +498,7 @@ impl Tcp<Established> {
 
     pub fn send(&mut self, data: &[u8]) -> Ack {
         let ack = self.build_ack(data);
-        self.retransmission.push_back(ack.packet.clone());
+        self.retransmission.push_back(ack.packet().clone());
         ack
     }
 
@@ -519,7 +511,7 @@ impl Tcp<Established> {
         warn!("retransmission");
         self.retransmission
             .get(0)
-            .map(|p| Ack { packet: p.clone() })
+            .map(|p| Ack::from_packet(p.clone()))
     }
 }
 

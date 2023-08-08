@@ -155,8 +155,20 @@ where
     }
 }
 
-macro_rules! impl_smol_message {
-    ($name:ident) => {
+macro_rules! check_flag {
+    ($p:ident, +, $flag:ident) => {
+        assert!($p.$flag(), "flag {} not set", stringify!($flag));
+    };
+    ($p:ident, -, $flag:ident) => {
+        assert!(!$p.$flag(), "flag {} set", stringify!($flag));
+    };
+}
+
+macro_rules! smol_message {
+    ($name:ident $({$($tag:tt $flag:ident)* $(,)?})*) => {
+        pub struct $name {
+            packet: TcpPacket<Vec<u8>>,
+        }
         impl Message for $name {}
         impl SmolMessage for $name {
             fn packet(&self) -> &TcpPacket<Vec<u8>> {
@@ -164,6 +176,7 @@ macro_rules! impl_smol_message {
             }
 
             fn from_packet(packet: TcpPacket<Vec<u8>>) -> Self {
+                $($(check_flag!(packet, $tag, $flag);)*)*
                 $name { packet }
             }
         }
@@ -175,59 +188,8 @@ macro_rules! impl_smol_message {
     };
 }
 
-/// [Syn] is the specific message type for a packet with
-/// the SYN flag set. We assume a well-behaved parser and
-/// leave the parsing implementation to the user. Hence,
-/// this demonstration has an extremely simplistic layout of
-/// message structs and does **no** error handling.
-/// Hence, it is possible to construct a [Syn] message out of
-/// a wrong packet. This should ideally be handled by checking
-/// that correct flags are set and returning errors.
-pub struct Syn {
-    packet: TcpPacket<Vec<u8>>,
-}
-impl_smol_message!(Syn);
-
-/// [SynAck] is the specific message type for a packet with
-/// the SYN flag set. We assume a well-behaved parser and
-/// leave the parsing implementation to the user. Hence,
-/// this demonstration has an extremely simplistic layout of
-/// message structs and does **no** error handling.
-/// Hence, it is possible to construct a [SynAck] message out of
-/// a wrong packet. This should ideally be handled by checking
-/// that correct flags are set and returning errors.
-pub struct SynAck {
-    pub packet: TcpPacket<Vec<u8>>,
-}
-impl_smol_message!(SynAck);
-
-/// [Ack] is the specific message type for a packet with
-/// the SYN flag set. We assume a well-behaved parser and
-/// leave the parsing implementation to the user. Hence,
-/// this demonstration has an extremely simplistic layout of
-/// message structs and does **no** error handling.
-/// Hence, it is possible to construct a [Ack] message out of
-/// a wrong packet. This should ideally be handled by checking
-/// that correct flags are set and returning errors.
-pub struct Ack {
-    pub packet: TcpPacket<Vec<u8>>,
-}
-impl_smol_message!(Ack);
-
-/// [FinAck] is the specific message type for a packet with
-/// the SYN flag set. We assume a well-behaved parser and
-/// leave the parsing implementation to the user. Hence,
-/// this demonstration has an extremely simplistic layout of
-/// message structs and does **no** error handling.
-/// Hence, it is possible to construct a [FinAck] message out of
-/// a wrong packet. This should ideally be handled by checking
-/// that correct flags are set and returning errors.
-pub struct FinAck {
-    pub packet: TcpPacket<Vec<u8>>,
-}
-impl_smol_message!(FinAck);
-
-pub struct Rst {
-    pub packet: TcpPacket<Vec<u8>>,
-}
-impl_smol_message!(Rst);
+smol_message!(Syn { +syn -ack -fin -rst });
+smol_message!(SynAck { +syn +ack -fin -rst });
+smol_message!(Ack { -syn +ack -fin -rst });
+smol_message!(FinAck { -syn +ack +fin -rst });
+smol_message!(Rst { -syn -ack -fin +rst });
