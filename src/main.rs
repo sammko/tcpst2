@@ -251,46 +251,86 @@ fn main() -> Result<()> {
                                 let (tcp, fin) = tcp.close();
                                 let st = net_channel.select_one(st, tcp.remote_addr(), fin);
 
-                                let (rx, mut recursive) = net_channel.offer_one_filtered(st, &tcp);
-                                let mut tcp = tcp
-                                    .recv(&rx)
-                                    .empty_acceptable()
-                                    .expect("FIN of ACK must be empty");
-
-                                loop {
-                                    let st = recursive.inner();
-                                    match net_channel.offer_two_filtered(
-                                        st,
-                                        |packet| {
-                                            let packet = packet.unwrap();
-                                            if packet.fin() {
-                                                Branch::Right(packet.into())
-                                            } else {
-                                                Branch::Left(packet.into())
-                                            }
-                                        },
-                                        &tcp,
-                                        None,
-                                    ) {
-                                        Branch::Left((ack, st)) => {
-                                            // We have received data from the Client, but we
-                                            // will just throw it away, since our user has
-                                            // closed.
-                                            let ack = tcp.recv_ack(&ack);
-                                            recursive =
-                                                net_channel.select_one(st, tcp.remote_addr(), ack);
-                                            continue;
+                                match net_channel.offer_two_filtered(
+                                    st,
+                                    |packet| {
+                                        let packet = packet.unwrap();
+                                        if packet.fin() {
+                                            Branch::Right(packet.into()) // simultaneous close
+                                        } else {
+                                            Branch::Left(packet.into()) // ack of our fin hopefully
                                         }
-                                        Branch::Right((fin, st)) => {
-                                            let remote_addr = tcp.remote_addr();
-                                            let ack = tcp.recv_fin(&fin);
-                                            let end = net_channel.select_one(st, remote_addr, ack);
-                                            net_channel.close(end);
-                                            system_user_channel.close(end);
-                                            break 'top;
+                                    },
+                                    &tcp,
+                                    None,
+                                ) {
+                                    Branch::Left((ack, mut recursive)) => {
+                                        let mut tcp = tcp
+                                            .recv_ack(&ack)
+                                            .empty_acceptable()
+                                            .expect("ACK of FIN must be empty");
+
+                                        loop {
+                                            let st = recursive.inner();
+                                            match net_channel.offer_two_filtered(
+                                                st,
+                                                |packet| {
+                                                    let packet = packet.unwrap();
+                                                    if packet.fin() {
+                                                        Branch::Right(packet.into())
+                                                    } else {
+                                                        Branch::Left(packet.into())
+                                                    }
+                                                },
+                                                &tcp,
+                                                None,
+                                            ) {
+                                                Branch::Left((ack, st)) => {
+                                                    // We have received data from the Client, but we
+                                                    // will just throw it away, since our user has
+                                                    // closed.
+                                                    let ack = tcp.recv_ack(&ack);
+                                                    recursive = net_channel.select_one(
+                                                        st,
+                                                        tcp.remote_addr(),
+                                                        ack,
+                                                    );
+                                                    continue;
+                                                }
+                                                Branch::Right((fin, st)) => {
+                                                    let remote_addr = tcp.remote_addr();
+                                                    let ack = tcp.recv_fin(&fin);
+                                                    let end = net_channel.select_one(
+                                                        st,
+                                                        remote_addr,
+                                                        ack,
+                                                    );
+                                                    net_channel.close(end);
+                                                    system_user_channel.close(end);
+                                                    break 'top;
+                                                }
+                                            }
                                         }
                                     }
-                                }
+                                    Branch::Right((fin, st)) => {
+                                        let remote_addr = tcp.remote_addr();
+                                        match tcp.recv_fin(&fin) {
+                                            Reaction::Acceptable(_, None, _) => unreachable!(),
+                                            Reaction::Acceptable(_, Some(ack), None) => {
+                                                let end =
+                                                    net_channel.select_one(st, remote_addr, ack);
+                                                net_channel.close(end);
+                                                system_user_channel.close(end);
+                                                break 'top;
+                                            }
+                                            Reaction::Acceptable(_, Some(_), Some(_)) => {
+                                                not_in_st!("FIN with payload")
+                                            }
+                                            Reaction::NotAcceptable(_, _) => not_in_st!(),
+                                            Reaction::Reset(_) => not_in_st!(),
+                                        }
+                                    }
+                                };
                             }
                         }
                     }

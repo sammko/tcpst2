@@ -203,17 +203,16 @@ pub enum ReactionInner<'a> {
 
 #[must_use]
 pub enum Reaction<'a, Ta, Tn> {
-    Acceptable(Tcp<Ta>, Option<Ack>, Option<&'a [u8]>),
-    NotAcceptable(Tcp<Tn>, Option<Ack>),
+    Acceptable(Ta, Option<Ack>, Option<&'a [u8]>),
+    NotAcceptable(Tn, Option<Ack>),
     Reset(Option<Rst>),
 }
 
 impl<Ta, Tn> Reaction<'_, Ta, Tn>
 where
-    Ta: TcpState,
-    Tn: TcpState,
+    Tn: Transition<Ta>,
 {
-    fn from_inner(inner: ReactionInner, tcp: Tcp<Tn>) -> Reaction<'_, Ta, Tn> {
+    fn from_inner(inner: ReactionInner, tcp: Tn) -> Reaction<'_, Ta, Tn> {
         match inner {
             ReactionInner::Acceptable(response, data) => {
                 Reaction::Acceptable(tcp.transition(), response, data)
@@ -222,8 +221,10 @@ where
             ReactionInner::Reset(response) => Reaction::Reset(response),
         }
     }
+}
 
-    pub fn empty_acceptable(self) -> Option<Tcp<Ta>> {
+impl<Ta, Tn> Reaction<'_, Ta, Tn> {
+    pub fn empty_acceptable(self) -> Option<Ta> {
         match self {
             Reaction::Acceptable(tcp, None, None) => Some(tcp),
             _ => None,
@@ -453,7 +454,7 @@ where
     }
 }
 
-trait Transition<T> {
+pub trait Transition<T> {
     fn transition(self) -> T;
 }
 
@@ -478,20 +479,26 @@ where
     }
 }
 
+impl<T> Transition<TcpClosed> for Tcp<T> {
+    fn transition(self) -> TcpClosed {
+        TcpClosed {}
+    }
+}
+
 impl Tcp<SynRcvd> {
-    pub fn recv_ack(mut self, ack: &Ack) -> Reaction<Established, SynRcvd> {
+    pub fn recv_ack(mut self, ack: &Ack) -> Reaction<Tcp<Established>, Tcp<SynRcvd>> {
         let ack = self.parse(ack);
         Reaction::from_inner(self.accept(&ack), self)
     }
 }
 
 impl Tcp<Established> {
-    pub fn recv(mut self, ack: &Ack) -> Reaction<Established, Established> {
+    pub fn recv(mut self, ack: &Ack) -> Reaction<Tcp<Established>, Tcp<Established>> {
         let ack = self.parse(ack);
         Reaction::from_inner(self.accept(&ack), self)
     }
 
-    pub fn recv_fin(mut self, fin: &FinAck) -> Reaction<CloseWait, Established> {
+    pub fn recv_fin(mut self, fin: &FinAck) -> Reaction<Tcp<CloseWait>, Tcp<Established>> {
         let fin = self.parse(fin);
         Reaction::from_inner(self.accept(&fin), self)
     }
@@ -516,7 +523,12 @@ impl Tcp<Established> {
 }
 
 impl Tcp<FinWait1> {
-    pub fn recv(mut self, ack: &Ack) -> Reaction<FinWait2, FinWait1> {
+    pub fn recv_fin(mut self, fin: &FinAck) -> Reaction<TcpClosed, Tcp<FinWait1>> {
+        let fin = self.parse(fin);
+        Reaction::from_inner(self.accept(&fin), self)
+    }
+
+    pub fn recv_ack(mut self, ack: &Ack) -> Reaction<Tcp<FinWait2>, Tcp<FinWait1>> {
         let ack = self.parse(ack);
         Reaction::from_inner(self.accept(&ack), self)
     }

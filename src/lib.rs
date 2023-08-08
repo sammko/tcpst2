@@ -20,9 +20,14 @@ Role!(pub RoleServerUser);
 Role!(pub RoleClientSystem);
 
 pub type ServerSystemFinWait1 = St![
-    (RoleClientSystem & Ack/* ACK of FIN. TODO we should handle other ACKs here as well maybe */)
-        .ServerSystemFinWait2
-];
+    (RoleClientSystem & {
+        Ack. // ACK of FIN. TODO we should handle other ACKs here as well maybe
+            ServerSystemFinWait2,
+        FinAck. // FIN and ACK of our FIN at the same time
+            (RoleClientSystem + Ack).
+            end
+    }
+)];
 
 Rec!(pub ServerSystemFinWait2, [
     (RoleClientSystem & {
