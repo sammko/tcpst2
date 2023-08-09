@@ -186,13 +186,23 @@ fn main() -> Result<()> {
             let mut recursive = system_user_channel.select_one(st, Connected(()));
             info!("established");
 
-            let mut timeout = None;
+            let mut last_timeout = Duration::from_millis(500);
+
             'top: loop {
                 let st = recursive.inner();
 
+                let timeout = {
+                    const MAX_TIMEOUT: Duration = Duration::from_secs(20);
+
+                    let timeout = last_timeout * 2;
+                    if timeout > MAX_TIMEOUT {
+                        MAX_TIMEOUT
+                    } else {
+                        timeout
+                    }
+                };
+
                 let tcp_for_picker = tcp.for_picker();
-                let timeout2 = timeout;
-                timeout = None; // reset timeout for next iteration
                 match net_channel.offer_two_filtered(
                     st,
                     move |packet| {
@@ -218,7 +228,11 @@ fn main() -> Result<()> {
                         }
                     },
                     &tcp,
-                    timeout2,
+                    if tcp.retransmission_queue_is_empty() {
+                        None
+                    } else {
+                        Some(timeout)
+                    },
                 ) {
                     Branch::Left((acceptable_with_data, st)) => {
                         let resp;
@@ -245,7 +259,6 @@ fn main() -> Result<()> {
                                 let tx = tcp.send(&data.0);
                                 let st = net_channel.select_one(st, tcp.remote_addr(), tx);
                                 recursive = st;
-                                timeout = Some(Duration::from_secs(1));
                             }
                             Branch::Right((_close, st)) => {
                                 let (tcp, fin) = tcp.close();
@@ -399,8 +412,8 @@ fn main() -> Result<()> {
                                 }
                                 Branch::Right((_, st)) => {
                                     let ack = tcp.retransmission().expect("Nothing to retransmit");
+                                    last_timeout = timeout;
                                     recursive = net_channel.select_one(st, tcp.remote_addr(), ack);
-                                    timeout = Some(Duration::from_secs(1));
                                 }
                             },
                         },

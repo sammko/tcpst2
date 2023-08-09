@@ -102,7 +102,7 @@ impl TcpListen {
         let mut tcb = Tcb {
             // irs: syn.seq_number,
             rcv_nxt: syn.seq_number + syn.segment_len(),
-            rcv_wnd: 1000,
+            rcv_wnd: 64000,
 
             // strictly speaking these should be set only when we get the first ACK
             // but let's set them to sensible values immediately
@@ -240,9 +240,15 @@ where
         self.remote.addr
     }
 
+    pub fn retransmission_queue_is_empty(&self) -> bool {
+        self.retransmission.is_empty()
+    }
+
     fn build_ack_raw(&mut self, payload: &[u8], fin: bool) -> TcpPacket<Vec<u8>> {
         let control = if fin {
             TcpControl::Fin
+        } else if !payload.is_empty() {
+            TcpControl::Psh
         } else {
             TcpControl::None
         };
@@ -259,6 +265,17 @@ where
             sack_ranges: [None, None, None],
             payload,
         };
+
+        if repr.segment_len() > self.tcb.snd_una + self.tcb.snd_wnd.into() - self.tcb.snd_nxt {
+            // This TCP implementation is fully synchronous, meaning that we
+            // do not buffer data to be sent. Becuase of that, implementing the
+            // (Sender's algorithm)[https://datatracker.ietf.org/doc/html/rfc9293#name-senders-algorithm-when-to-s]
+            // correctly is not quite possible.
+            //
+            // This situation is unlikely under our assumptions, however. So let's just
+            // warn the user and continue.
+            warn!("Sending more than the send window allows");
+        }
 
         self.tcb.snd_nxt += repr.segment_len();
 
